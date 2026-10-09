@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Directory Auditor — Lab</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="hdr">
+  <div class="brand"><span class="logo">DA</span><span>Lab control panel</span> <span class="sub mono" id="labname"></span></div>
+  <div class="right"><button class="toggle" id="theme">Theme</button><button class="toggle" id="quit">Quit</button></div>
+</header>
+
+<div class="wrap">
+  <div class="banner hidden" id="hostbanner"></div>
+
+  <section class="card">
+    <div class="cardhd"><h2>1 · Credentials</h2><span class="hint">held in memory for this session only — never saved to the lab file</span></div>
+    <div class="grid">
+      <label>Admin password <span class="hint">DA\Administrator / root after promotion</span>
+        <input class="inp" id="c_admin" type="password" autocomplete="off"></label>
+      <label>Audit user <input class="inp" id="c_user" type="text" autocomplete="off" placeholder="audit"></label>
+      <label>Audit password <span class="hint">the ordinary account the scan uses</span>
+        <input class="inp" id="c_audit" type="password" autocomplete="off"></label>
+    </div>
+    <div class="actions"><button class="btn" id="savecreds">Save credentials</button><span class="ok hidden" id="credsok">set ✓</span></div>
+  </section>
+
+  <section class="card">
+    <div class="cardhd"><h2>2 · Build the tool</h2><span class="hint" id="builtline">not built yet</span></div>
+    <div class="actions">
+      <label class="inline">ref <input class="inp sm" id="ref" type="text" autocomplete="off" placeholder="main / v0.1.0 / commit"></label>
+      <button class="btn" id="build">Build latest</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="cardhd"><h2>3 · Lab</h2>
+      <span><button class="btn ghost sm" id="runall">Reset + scan all</button>
+      <button class="toggle" id="editcfg">Edit config</button></span></div>
+    <table class="machines"><thead><tr>
+      <th>Machine</th><th>Kind</th><th>Domain</th><th>IP</th><th>VM</th><th>Baseline</th><th>Last scan</th><th>Actions</th>
+    </tr></thead><tbody id="rows"></tbody></table>
+  </section>
+
+  <section class="card hidden" id="cfgcard">
+    <div class="cardhd"><h2>Config editor</h2><span class="hint" id="cfgpath"></span></div>
+    <div class="grid2">
+      <label>repo_dir <input class="inp" id="f_repo" type="text"></label>
+      <label>switch <input class="inp" id="f_switch" type="text"></label>
+      <label>work_dir <input class="inp" id="f_work" type="text"></label>
+      <label>default ref <input class="inp" id="f_ref" type="text"></label>
+    </div>
+    <div id="mrows"></div>
+    <div class="actions"><button class="btn ghost sm" id="addm">+ Add machine</button>
+      <button class="btn" id="savecfg">Save config</button>
+      <span class="err hidden" id="cfgerr"></span></div>
+  </section>
+
+  <section class="card">
+    <div class="cardhd"><h2 id="loghd">Log</h2><span class="hint" id="jobline"></span></div>
+    <pre class="console" id="console"></pre>
+  </section>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

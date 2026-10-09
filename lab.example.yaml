@@ -1,0 +1,42 @@
+# Directory Auditor lab — copy to lab.yaml and edit (the UI can edit it too).
+# Runs on the Hyper-V host. You supply the install ISOs; the panel builds the
+# tool, creates/provisions the VMs, and deploys+scans them.
+name: dirauditor-lab
+switch: da-lab               # Hyper-V *internal* switch (isolated, no uplink)
+subnet: 10.55.0.0/24         # informational
+repo_dir: C:\src\directory-auditor   # local clone to build from
+ref: main                    # default git ref to build (branch, tag or commit)
+work_dir: C:\lab\work        # builds, unattend files and reports land here
+
+machines:
+  - name: DA-DC-2022
+    kind: windows-dc
+    iso: C:\iso\WinServer2022_Eval.iso
+    domain: da.test
+    ip: 10.55.0.10
+    forest_mode: Win2016
+    expect: testdata/lab/windows-expect.yaml
+    cpu: 2
+    mem_gb: 4
+    disk_gb: 60
+
+  - name: DA-DC-2025
+    kind: windows-dc
+    iso: C:\iso\WinServer2025_Eval.iso
+    domain: da.test
+    ip: 10.55.0.11
+    forest_mode: Win2025
+    expect: testdata/lab/windows-expect.yaml
+    cpu: 2
+    mem_gb: 4
+    disk_gb: 60
+
+  - name: DA-ALT-DOMEN
+    kind: alt-dc               # Альт Домен — a Samba AD DC on Alt Server
+    iso: C:\iso\alt-domain.iso
+    domain: alt.test
+    ip: 10.55.0.12
+    expect: testdata/lab/samba-expect.yaml
+    cpu: 2
+    mem_gb: 4
+    disk_gb: 40
