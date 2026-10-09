@@ -158,10 +158,8 @@ The scanner has no Kerberos ticket, so the channel depends on the target:
 - Linux installs (Альт Домен, РЕД АДМ, ALD Pro, scanner) are interactive in this
   version (their preseed/kickstart varies by build); labctl takes over at
   **provision** over SSH once the guest is up and reachable.
-- Scanning from a non-joined box means **on-box Samba `smb.conf` tier-2 checks do
-  not run** (they need local file access on the DC). If you want them, run a
-  `dirauditor scan --local` on the Samba DC itself as a separate step; the
-  network scan from the scanner covers everything else.
+- Samba targets (Альт Домен, РЕД АДМ) are scanned **remotely only**, from the
+  scanner over the network like every other target; there is no on-box scan.
 - The RED OS vendor Samba-DC package name is resolved on-box from a candidate
   list; confirm it for your RED OS release (the script refuses rather than
   pulling upstream).
