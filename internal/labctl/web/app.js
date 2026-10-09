@@ -3,7 +3,7 @@
 const TOKEN = new URLSearchParams(location.search).get("t") || "";
 const $ = id => document.getElementById(id);
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-let state = null, es = null, lab = null;
+let state = null, es = null, lab = null, kinds = [];
 
 async function api(path, body){
   const o = {headers:{"X-Lab-Token":TOKEN},cache:"no-store"};
@@ -12,19 +12,36 @@ async function api(path, body){
   return r.json().catch(()=>({ok:false,error:"HTTP "+r.status}));
 }
 
+/* ---- pivot / views ---- */
+function go(view){
+  document.querySelectorAll(".view").forEach(v=>v.classList.toggle("hidden", v.id!==view));
+  document.querySelectorAll(".ptab").forEach(t=>t.setAttribute("aria-selected", t.dataset.go===view ? "true":"false"));
+  if(view==="config") fillCfg();
+}
+document.querySelectorAll(".ptab").forEach(t=>t.onclick=()=>go(t.dataset.go));
+
 async function refresh(){
   const s = await api("/api/state");
   if(!s.ok) return;
-  state = s; lab = s.lab;
-  $("labname").textContent = lab.name || "";
+  state = s; lab = s.lab; kinds = s.kinds || [];
+  $("labname").textContent = lab.name ? "· "+lab.name : "";
   $("hostbanner").classList.toggle("hidden", s.host_ok);
-  if(!s.host_ok) $("hostbanner").textContent = "⚠ "+s.host_msg+" — build, config and the UI work here; VM actions need the Windows host.";
+  $("hostbadge").textContent = s.host_ok ? "Hyper-V host" : "UI only";
+  if(!s.host_ok) $("hostmsg").textContent = s.host_msg+" Build, config and the UI work here; VM actions need the Windows host.";
   $("credsok").classList.toggle("hidden", !s.creds_set);
   $("builtline").textContent = s.built ? ("built "+s.built.version+" ("+s.built.commit+")") : "not built yet";
   renderRows();
   const busy = s.busy;
-  document.querySelectorAll("button.btn, .rowact button").forEach(b=>{ if(b.id!=="quit"&&!b.classList.contains("keepon")) b.disabled = busy; });
-  if(s.job){ $("jobline").textContent = s.job.title+" · "+s.job.status; tail(s.job.id); }
+  document.querySelectorAll("button.btn, .rowact button").forEach(b=>{ b.disabled = busy; });
+  $("jobline").textContent = s.job ? (s.job.title+" · "+s.job.status) : (busy?"busy":"idle");
+  if(s.job){ tail(s.job.id); }
+}
+
+function kindPill(kind){
+  const k = kinds.find(x=>x.kind===kind);
+  const os = k ? k.os : "";
+  const label = k ? k.label : kind;
+  return `<span class="kindpill" title="${esc(label)}"><span class="os ${esc(os)}"></span>${esc(kind)}</span>`;
 }
 
 function renderRows(){
@@ -36,7 +53,7 @@ function renderRows(){
     const base = m.has_baseline ? "✓" : "<span class=hint>—</span>";
     const acts = ["create","provision","snapshot","reset","start","stop","scan"].map(a=>`<button data-m="${esc(m.name)}" data-a="${a}">${a}</button>`).join("");
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td><b>${esc(m.name)}</b></td><td>${esc(m.kind)}</td><td>${esc(m.domain)}</td><td class=mono>${esc(m.ip)}</td>`+
+    tr.innerHTML = `<td><b>${esc(m.name)}</b></td><td>${kindPill(m.kind)}</td><td>${esc(m.domain)}</td><td class=mono>${esc(m.ip)}</td>`+
       `<td><span class="dot ${dot}"></span>${esc(vm)}</td><td>${base}</td><td>${res}</td><td><div class="rowact">${acts}</div></td>`;
     tb.appendChild(tr);
   });
@@ -46,7 +63,7 @@ function renderRows(){
 function line(ev){
   const c = $("console");
   const t = ev;
-  let cls = ""; if(t.startsWith("$ "))cls="cmd"; else if(t.startsWith("ERROR"))cls="err"; else if(t.startsWith("» "))cls="me";
+  let cls = ""; if(t.startsWith("$ "))cls="cmd"; else if(t.startsWith("ERROR"))cls="err"; else if(t.startsWith("» ")||t.startsWith("==="))cls="me";
   const span = document.createElement("span");
   span.className = cls; span.textContent = t+"\n"; c.appendChild(span);
   c.scrollTop = c.scrollHeight;
@@ -76,19 +93,22 @@ $("build").onclick = ()=>start(()=>api("/api/build",{ref:$("ref").value.trim()})
 $("runall").onclick = ()=>start(()=>api("/api/run-all",{}));
 
 /* ---- config editor ---- */
-$("editcfg").onclick = ()=>{ const c=$("cfgcard"); c.classList.toggle("hidden"); if(!c.classList.contains("hidden")) fillCfg(); };
 function fillCfg(){
   $("cfgpath").textContent = ""; $("cfgerr").classList.add("hidden");
   $("f_repo").value=lab.repo_dir||""; $("f_switch").value=lab.switch||""; $("f_work").value=lab.work_dir||""; $("f_ref").value=lab.ref||"";
   const mr = $("mrows"); mr.innerHTML="";
   (lab.machines||[]).forEach((m,i)=>mr.appendChild(mrow(m,i)));
 }
+function kindOptions(sel){
+  return (kinds.length?kinds:[{kind:"windows-dc",label:"windows-dc"}]).map(k=>
+    `<option value="${esc(k.kind)}"${k.kind===sel?' selected':''}>${esc(k.label||k.kind)}</option>`).join("");
+}
 function mrow(m,i){
   const d = document.createElement("div"); d.className="mrow"; d.dataset.i=i;
   const f=(k,v,ph)=>`<label>${k}<input class="inp m_${k}" value="${esc(v==null?'':v)}" placeholder="${ph||''}"></label>`;
   d.innerHTML =
     f("name",m.name)+
-    `<label>kind<select class="inp m_kind"><option${m.kind==='windows-dc'?' selected':''}>windows-dc</option><option${m.kind==='alt-dc'?' selected':''}>alt-dc</option></select></label>`+
+    `<label>kind<select class="inp m_kind">${kindOptions(m.kind)}</select></label>`+
     f("domain",m.domain,"da.test")+f("ip",m.ip,"10.55.0.10")+
     `<button class="del">✕</button>`+
     f("iso",m.iso,"path to install ISO")+f("forest_mode",m.forest_mode,"Win2016")+
@@ -96,7 +116,7 @@ function mrow(m,i){
   d.querySelector(".del").onclick=()=>{ lab.machines.splice(i,1); fillCfg(); };
   return d;
 }
-$("addm").onclick = ()=>{ lab.machines=lab.machines||[]; lab.machines.push({name:"NEW",kind:"windows-dc",domain:"da.test",ip:"10.55.0.20",prefix:24,cpu:2,mem_gb:4,disk_gb:60,forest_mode:"Win2016"}); fillCfg(); };
+$("addm").onclick = ()=>{ lab.machines=lab.machines||[]; lab.machines.push({name:"NEW",kind:(kinds[0]&&kinds[0].kind)||"windows-dc",domain:"da.test",ip:"10.55.0.20",prefix:24,cpu:2,mem_gb:4,disk_gb:60,forest_mode:"Win2016"}); fillCfg(); };
 $("savecfg").onclick = async ()=>{
   const g=id=>$(id).value.trim();
   const next = {name:lab.name,subnet:lab.subnet,repo_dir:g("f_repo"),switch:g("f_switch"),work_dir:g("f_work"),ref:g("f_ref"),machines:[]};
@@ -108,7 +128,7 @@ $("savecfg").onclick = async ()=>{
   });
   const r = await api("/api/config", next);
   if(!r.ok){ const e=$("cfgerr"); e.textContent=r.error; e.classList.remove("hidden"); return; }
-  $("cfgcard").classList.add("hidden"); refresh();
+  refresh(); go("lab");
 };
 
 /* ---- chrome ---- */

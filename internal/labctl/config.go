@@ -130,8 +130,8 @@ func (l *Lab) Validate() error {
 			add("duplicate machine name %q", m.Name)
 		}
 		seen[strings.ToLower(m.Name)] = true
-		if !kinds[m.Kind] {
-			add("%s: kind must be windows-dc or alt-dc", m.Name)
+		if _, ok := plugin(m.Kind); !ok {
+			add("%s: unknown kind %q", m.Name, m.Kind)
 		}
 		if !domainRe.MatchString(m.Domain) {
 			add("%s: domain %q is invalid", m.Name, m.Domain)

@@ -32,7 +32,7 @@ machines:
     disk_gb: 60
 
   - name: DA-ALT-DOMEN
-    kind: alt-dc               # Альт Домен — a Samba AD DC on Alt Server
+    kind: alt-domen            # Альт Домен — a Samba AD DC on Alt Server
     iso: C:\iso\alt-domain.iso
     domain: alt.test
     ip: 10.55.0.12
@@ -40,3 +40,23 @@ machines:
     cpu: 2
     mem_gb: 4
     disk_gb: 40
+
+  - name: DA-ALDPRO
+    kind: ald-pro              # ALD Pro (Astra) — a FreeIPA-based domain
+    iso: C:\iso\ald-pro.iso    # installs its own IPA domain during OS setup
+    domain: ald.test
+    ip: 10.55.0.13
+    expect: testdata/lab/freeipa-admin-expect.yaml
+    cpu: 2
+    mem_gb: 6
+    disk_gb: 50
+
+  - name: DA-REDADM
+    kind: red-adm              # РЕД АДМ (RED OS) — also FreeIPA-based
+    iso: C:\iso\red-adm.iso
+    domain: red.test
+    ip: 10.55.0.14
+    expect: testdata/lab/freeipa-admin-expect.yaml
+    cpu: 2
+    mem_gb: 6
+    disk_gb: 50

@@ -93,9 +93,9 @@ Write-Host 'windows provisioning done'
 	return psEnv(ctx, j, script, map[string]string{"LAB_ADMIN_PASSWORD": cr.AdminPassword})
 }
 
-// provisionAlt provisions a Samba-based Альт Домен DC over SSH using the
+// provisionSamba provisions a Samba-based Альт Домен DC over SSH using the
 // tools/lab/samba scripts. Assumes key-based SSH to root@<ip> is set up.
-func provisionAlt(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
+func provisionSamba(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
 	prov := filepath.Join(l.RepoDir, "tools", "lab", "samba", "provision.sh")
 	pop := filepath.Join(l.RepoDir, "tools", "lab", "samba", "populate.sh")
 	for _, p := range []string{prov, pop} {
@@ -118,6 +118,34 @@ func provisionAlt(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) err
 	return nil
 }
 
+// provisionFreeIPA seeds the weak fixtures on a FreeIPA-based domain (ALD Pro,
+// РЕД АДМ) over SSH. These products install their own IPA domain during OS
+// setup, so this runs the tools/lab/freeipa scripts (a provision.sh if present,
+// then populate.sh) against the already-installed domain. Key-based SSH to
+// root@<ip> is assumed.
+func provisionFreeIPA(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
+	dir := filepath.Join(l.RepoDir, "tools", "lab", "freeipa")
+	pop := filepath.Join(dir, "populate.sh")
+	if _, err := os.Stat(pop); err != nil {
+		return fmt.Errorf("missing %s (the FreeIPA lab scripts)", pop)
+	}
+	realm := strings.ToUpper(m.Domain)
+	steps := []string{filepath.Join(dir, "provision.sh"), pop} // provision.sh is optional
+	for _, path := range steps {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue // provision.sh may not exist for an appliance that self-installs
+		}
+		j.Logf("freeipa %s over ssh to %s", filepath.Base(path), m.IP)
+		env := fmt.Sprintf("DIRAUDITOR_LAB=1 LAB_REALM=%s LAB_DOMAIN=%s LAB_ADMIN_PASSWORD=%s",
+			shQuote(realm), shQuote(m.Domain), shQuote(cr.AdminPassword))
+		if err := sshScript(ctx, j, m.IP, env+" bash -s", string(b)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // deployAndScan runs the freshly built auditor against the machine as the
 // ordinary audit user and writes a report under WorkDir/reports/<name>.
 func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr Creds) (string, error) {
@@ -125,19 +153,24 @@ func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr
 	_ = os.MkdirAll(outDir, 0o755)
 	cat := filepath.Join(l.RepoDir, "catalogue")
 	user := fmt.Sprintf("%s@%s", cr.auditUser(), m.Domain)
+	p, _ := plugin(m.Kind)
 
-	if m.Kind == "alt-dc" {
-		// Full coverage (incl. smb.conf checks) needs the Linux binary on the box.
+	if p.OS == "linux" {
+		// Linux targets (Samba / FreeIPA) are scanned on the box so provider
+		// auto-detection and, for Samba, the local smb.conf checks all apply.
 		remote := "/tmp/dirauditor"
 		if err := scp(ctx, j, b.LinBin, fmt.Sprintf("root@%s:%s", m.IP, remote)); err != nil {
 			return "", err
 		}
-		cmd := fmt.Sprintf("DIRAUDITOR_LAB=1 %s scan --server %s --domain %s --user %s --password-stdin --local --catalogue /tmp/catalogue --packs '' --out /tmp/lab-out --lang en; cat /tmp/lab-out/report.json",
-			remote, m.IP, m.Domain, user)
-		// copy the catalogue too
 		if err := scp(ctx, j, cat, fmt.Sprintf("root@%s:/tmp/catalogue", m.IP)); err != nil {
 			return "", err
 		}
+		local := ""
+		if p.LocalScan {
+			local = "--local "
+		}
+		cmd := fmt.Sprintf("DIRAUDITOR_LAB=1 %s scan --server %s --domain %s --user %s --password-stdin %s--catalogue /tmp/catalogue --packs '' --out /tmp/lab-out --lang en; cat /tmp/lab-out/report.json",
+			remote, m.IP, m.Domain, user, local)
 		rep := filepath.Join(outDir, "report.json")
 		if err := sshCaptureToFile(ctx, j, m.IP, cmd, cr.AuditPassword, rep); err != nil {
 			return "", err
@@ -145,7 +178,7 @@ func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr
 		return rep, nil
 	}
 
-	// Windows DC (or any AD DC): scan over the network from the host.
+	// Windows / AD DC: scan over the network from the host.
 	exe := b.WinExe
 	if _, err := os.Stat(exe); err != nil {
 		return "", fmt.Errorf("built binary missing: %s (run Build first)", exe)

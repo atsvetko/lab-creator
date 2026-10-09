@@ -100,13 +100,11 @@ func (s *Server) provision(ctx context.Context, j *Job, m *Machine, cr Creds) er
 	if cr.AdminPassword == "" {
 		return fmt.Errorf("set the admin password first (Credentials)")
 	}
-	switch m.Kind {
-	case "windows-dc":
-		return provisionWindows(ctx, j, s.lab, m, cr)
-	case "alt-dc":
-		return provisionAlt(ctx, j, s.lab, m, cr)
+	p, ok := plugin(m.Kind)
+	if !ok || p.Provision == nil {
+		return fmt.Errorf("no provisioner for kind %q", m.Kind)
 	}
-	return fmt.Errorf("unknown kind %q", m.Kind)
+	return p.Provision(ctx, j, s.lab, m, cr)
 }
 
 func (s *Server) scan(ctx context.Context, j *Job, m *Machine, cr Creds) error {

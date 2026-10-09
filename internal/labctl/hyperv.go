@@ -76,34 +76,43 @@ func createVM(ctx context.Context, j *Job, l *Lab, m *Machine, answerISO string)
 	if answerISO != "" {
 		secondary = fmt.Sprintf("Add-VMDvdDrive -VMName %s -Path %s", psQuote(m.Name), psQuote(answerISO))
 	}
-	// Gen-2 for Windows; Gen-1 is friendlier for some Linux installers, but Альт
-	// (UEFI) installs fine on Gen-2 with Secure Boot off.
+	// Firmware depends on the plugin: Windows and UEFI Linux use Gen-2 with
+	// Secure Boot off; a plugin may ask for Gen-1 for an older Linux installer.
+	gen, secureBoot := 2, false
+	if p, ok := plugin(m.Kind); ok {
+		if p.Generation != 0 {
+			gen = p.Generation
+		}
+		secureBoot = p.SecureBoot
+	}
+	firmware, bootDev := "", ""
+	if gen == 2 {
+		sb := "Off"
+		if secureBoot {
+			sb = "On"
+		}
+		firmware = fmt.Sprintf("Set-VMFirmware -VMName %s -EnableSecureBoot %s\n", psQuote(m.Name), sb)
+		bootDev = fmt.Sprintf("$dvd = Get-VMDvdDrive -VMName %s | Select-Object -First 1\nSet-VMFirmware -VMName %s -FirstBootDevice $dvd\n", psQuote(m.Name), psQuote(m.Name))
+	}
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 $vhd = %s
 New-Item -ItemType Directory -Force -Path (Split-Path $vhd) | Out-Null
 if (Get-VM -Name %s -ErrorAction SilentlyContinue) { throw 'VM already exists; remove it first' }
 New-VHD -Path $vhd -SizeBytes %dGB -Dynamic | Out-Null
-New-VM -Name %s -Generation 2 -MemoryStartupBytes %dGB -SwitchName %s -VHDPath $vhd | Out-Null
+New-VM -Name %s -Generation %d -MemoryStartupBytes %dGB -SwitchName %s -VHDPath $vhd | Out-Null
 Set-VM -Name %s -ProcessorCount %d -AutomaticCheckpointsEnabled $false
-Set-VMFirmware -VMName %s -EnableSecureBoot Off
-Add-VMDvdDrive -VMName %s -Path %s
-%s
-$dvd = Get-VMDvdDrive -VMName %s | Select-Object -First 1
-Set-VMFirmware -VMName %s -FirstBootDevice $dvd
-Write-Host ("created VM {0} ({1} vCPU, {2} GB, {3} GB disk) on {4}" -f %s, %d, %d, %d, %s)
+%sAdd-VMDvdDrive -VMName %s -Path %s
+%s%sWrite-Host ("created VM {0} (gen %d, {1} vCPU, {2} GB) on {3}" -f %s, %d, %d, %s)
 `,
 		psQuote(vhd),
 		psQuote(m.Name),
 		m.DiskGB,
-		psQuote(m.Name), m.MemGB, psQuote(l.Switch),
+		psQuote(m.Name), gen, m.MemGB, psQuote(l.Switch),
 		psQuote(m.Name), m.CPU,
-		psQuote(m.Name),
-		psQuote(m.Name), psQuote(m.ISO),
-		secondary,
-		psQuote(m.Name),
-		psQuote(m.Name),
-		psQuote(m.Name), m.CPU, m.MemGB, m.DiskGB, psQuote(l.Switch))
+		firmware, psQuote(m.Name), psQuote(m.ISO),
+		secondary, bootDev, gen,
+		psQuote(m.Name), m.CPU, m.MemGB, psQuote(l.Switch))
 	if err := ps(ctx, j, script); err != nil {
 		return err
 	}

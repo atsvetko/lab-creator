@@ -155,7 +155,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"ok": true, "host_ok": hostOK, "host_msg": hostMsg,
 		"lab": s.lab, "built": built, "creds_set": credsSet,
-		"machines": ms, "busy": s.mgr.Busy(), "job": job,
+		"machines": ms, "busy": s.mgr.Busy(), "job": job, "kinds": Kinds(),
 	})
 }
 
