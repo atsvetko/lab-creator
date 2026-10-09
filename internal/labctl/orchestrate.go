@@ -69,6 +69,9 @@ func (s *Server) startRunAll() (*Job, error) {
 		var failed int
 		for i := range s.lab.Machines {
 			m := &s.lab.Machines[i]
+			if m.isScanner() {
+				continue // the scanner runs the scans; it is not a scan target
+			}
 			j.Logf("=== %s (%s) ===", m.Name, m.Kind)
 			if !HasCheckpoint(ctx, m.Name, "vuln-baseline") {
 				j.Logf("%s: no baseline checkpoint — skipping (Provision + Snapshot it first)", m.Name)

@@ -93,24 +93,35 @@ Write-Host 'windows provisioning done'
 	return psEnv(ctx, j, script, map[string]string{"LAB_ADMIN_PASSWORD": cr.AdminPassword})
 }
 
-// provisionSamba provisions a Samba-based Альт Домен DC over SSH using the
-// tools/lab/samba scripts. Assumes key-based SSH to root@<ip> is set up.
-func provisionSamba(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
-	prov := filepath.Join(l.RepoDir, "tools", "lab", "samba", "provision.sh")
-	pop := filepath.Join(l.RepoDir, "tools", "lab", "samba", "populate.sh")
-	for _, p := range []string{prov, pop} {
-		if _, err := os.Stat(p); err != nil {
-			return fmt.Errorf("missing %s", p)
-		}
+// provisionLinux stands up a Linux target DC over SSH: it runs the plugin's
+// vendor install+promote script (which installs the vendor's own Samba/FreeIPA
+// packages — never upstream) and then the directory-specific populate.sh that
+// seeds the deliberately-weak fixtures. Key-based SSH to root@<ip> is assumed.
+func provisionLinux(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
+	p, _ := plugin(m.Kind)
+	env := fmt.Sprintf("DIRAUDITOR_LAB=1 LAB_REALM=%s LAB_DOMAIN=%s LAB_HOST=%s LAB_IP=%s LAB_ADMIN_PASSWORD=%s",
+		shQuote(strings.ToUpper(m.Domain)), shQuote(m.Domain), shQuote(shortHost(m)), shQuote(m.IP), shQuote(cr.AdminPassword))
+
+	type step struct {
+		name, path string
+		optional   bool
 	}
-	realm := strings.ToUpper(m.Domain)
-	for _, step := range []struct{ name, path string }{{"provision", prov}, {"populate", pop}} {
-		b, err := os.ReadFile(step.path)
+	var steps []step
+	if p.ProvisionScript != "" {
+		steps = append(steps, step{"provision", filepath.Join(l.RepoDir, filepath.FromSlash(p.ProvisionScript)), false})
+	}
+	if p.PopulateDir != "" {
+		steps = append(steps, step{"populate", filepath.Join(l.RepoDir, filepath.FromSlash(p.PopulateDir), "populate.sh"), false})
+	}
+	for _, s := range steps {
+		b, err := os.ReadFile(s.path)
 		if err != nil {
-			return err
+			if s.optional {
+				continue
+			}
+			return fmt.Errorf("missing %s (is repo_dir correct?)", s.path)
 		}
-		j.Logf("alt %s over ssh to %s", step.name, m.IP)
-		env := fmt.Sprintf("DIRAUDITOR_LAB=1 LAB_REALM=%s", shQuote(realm))
+		j.Logf("%s: %s over ssh to %s", m.Kind, s.name, m.IP)
 		if err := sshScript(ctx, j, m.IP, env+" bash -s", string(b)); err != nil {
 			return err
 		}
@@ -118,79 +129,81 @@ func provisionSamba(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) e
 	return nil
 }
 
-// provisionFreeIPA seeds the weak fixtures on a FreeIPA-based domain (ALD Pro,
-// РЕД АДМ) over SSH. These products install their own IPA domain during OS
-// setup, so this runs the tools/lab/freeipa scripts (a provision.sh if present,
-// then populate.sh) against the already-installed domain. Key-based SSH to
-// root@<ip> is assumed.
-func provisionFreeIPA(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
-	dir := filepath.Join(l.RepoDir, "tools", "lab", "freeipa")
-	pop := filepath.Join(dir, "populate.sh")
-	if _, err := os.Stat(pop); err != nil {
-		return fmt.Errorf("missing %s (the FreeIPA lab scripts)", pop)
-	}
-	realm := strings.ToUpper(m.Domain)
-	steps := []string{filepath.Join(dir, "provision.sh"), pop} // provision.sh is optional
-	for _, path := range steps {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			continue // provision.sh may not exist for an appliance that self-installs
-		}
-		j.Logf("freeipa %s over ssh to %s", filepath.Base(path), m.IP)
-		env := fmt.Sprintf("DIRAUDITOR_LAB=1 LAB_REALM=%s LAB_DOMAIN=%s LAB_ADMIN_PASSWORD=%s",
-			shQuote(realm), shQuote(m.Domain), shQuote(cr.AdminPassword))
-		if err := sshScript(ctx, j, m.IP, env+" bash -s", string(b)); err != nil {
-			return err
-		}
-	}
-	return nil
+// provisionScanner prepares the dedicated scanner VM: it is not domain-joined
+// and has no directory of its own, so there is nothing to promote — we only
+// confirm we can reach it over SSH (the tool is copied there at scan time).
+func provisionScanner(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
+	j.Logf("scanner %s: not domain-joined — no provisioning; checking SSH to root@%s", m.Name, m.IP)
+	return sshScript(ctx, j, m.IP, "bash -s", "echo scanner reachable: $(uname -a)")
 }
 
-// deployAndScan runs the freshly built auditor against the machine as the
-// ordinary audit user and writes a report under WorkDir/reports/<name>.
+// deployAndScan runs every scan FROM the dedicated scanner VM (a non-joined
+// Linux box) against the target DC over the network, as the ordinary audit
+// user, and writes a report under WorkDir/reports/<name>. The scanner never
+// joins any domain; it binds with explicit credentials and the right provider.
 func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr Creds) (string, error) {
+	sc := l.Scanner()
+	if sc == nil {
+		return "", fmt.Errorf("no scanner machine in the lab — add one (kind: linux-scanner); all scans run from it")
+	}
+	if m.isScanner() {
+		return "", fmt.Errorf("%s is the scanner, not a scan target", m.Name)
+	}
 	outDir := filepath.Join(l.WorkDir, "reports", m.Name)
 	_ = os.MkdirAll(outDir, 0o755)
-	cat := filepath.Join(l.RepoDir, "catalogue")
-	user := fmt.Sprintf("%s@%s", cr.auditUser(), m.Domain)
-	p, _ := plugin(m.Kind)
 
-	if p.OS == "linux" {
-		// Linux targets (Samba / FreeIPA) are scanned on the box so provider
-		// auto-detection and, for Samba, the local smb.conf checks all apply.
-		remote := "/tmp/dirauditor"
-		if err := scp(ctx, j, b.LinBin, fmt.Sprintf("root@%s:%s", m.IP, remote)); err != nil {
-			return "", err
-		}
-		if err := scp(ctx, j, cat, fmt.Sprintf("root@%s:/tmp/catalogue", m.IP)); err != nil {
-			return "", err
-		}
-		local := ""
-		if p.LocalScan {
-			local = "--local "
-		}
-		cmd := fmt.Sprintf("DIRAUDITOR_LAB=1 %s scan --server %s --domain %s --user %s --password-stdin %s--catalogue /tmp/catalogue --packs '' --out /tmp/lab-out --lang en; cat /tmp/lab-out/report.json",
-			remote, m.IP, m.Domain, user, local)
-		rep := filepath.Join(outDir, "report.json")
-		if err := sshCaptureToFile(ctx, j, m.IP, cmd, cr.AuditPassword, rep); err != nil {
-			return "", err
-		}
-		return rep, nil
+	// Put the freshly built Linux binary and the catalogue on the scanner.
+	if _, err := os.Stat(b.LinBin); err != nil {
+		return "", fmt.Errorf("built Linux binary missing: %s (run Build first)", b.LinBin)
 	}
-
-	// Windows / AD DC: scan over the network from the host.
-	exe := b.WinExe
-	if _, err := os.Stat(exe); err != nil {
-		return "", fmt.Errorf("built binary missing: %s (run Build first)", exe)
-	}
-	cmd := exec.CommandContext(ctx, exe, "scan",
-		"--server", m.IP, "--domain", m.Domain, "--user", user, "--password-stdin",
-		"--catalogue", cat, "--packs", "", "--out", outDir, "--lang", "en")
-	cmd.Stdin = strings.NewReader(cr.AuditPassword)
-	if err := streamCmd(ctx, j, cmd); err != nil {
+	if err := scp(ctx, j, b.LinBin, fmt.Sprintf("root@%s:/opt/dirauditor", sc.IP)); err != nil {
 		return "", err
 	}
-	return filepath.Join(outDir, "report.json"), nil
+	if err := scp(ctx, j, filepath.Join(l.RepoDir, "catalogue"), fmt.Sprintf("root@%s:/opt/dirauditor-catalogue", sc.IP)); err != nil {
+		return "", err
+	}
+	if err := sshScript(ctx, j, sc.IP, "bash -s", "chmod +x /opt/dirauditor"); err != nil {
+		return "", err
+	}
+
+	p, _ := plugin(m.Kind)
+	user := fmt.Sprintf("%s@%s", cr.auditUser(), m.Domain)
+
+	// Transport. Samba/FreeIPA self-sign, so from the non-joined scanner we pin
+	// the target's LDAPS certificate and stay encrypted. A vanilla Windows DC
+	// has no LDAPS and the scanner has no Kerberos, so fall back to a lab-only
+	// plaintext simple bind on the isolated switch.
+	tls := "--tls none --insecure-plaintext"
+	if p.LDAPS {
+		pin, err := ldapsPin(ctx, j, sc.IP, m.IP)
+		if err != nil || pin == "" {
+			j.Logf("%s: could not fetch LDAPS pin from %s (%v) — the scan will fail closed rather than drop encryption; check the DC is up and serving 636", m.Name, m.IP, err)
+			return "", fmt.Errorf("no LDAPS certificate from %s:636", m.IP)
+		}
+		tls = fmt.Sprintf("--tls ldaps --pin %s", pin)
+		j.Logf("%s: pinned LDAPS cert %s…", m.Name, pin[:min(16, len(pin))])
+	} else {
+		j.Logf("%s: no LDAPS/Kerberos available from a non-joined scanner — using a lab-only plaintext bind on the isolated switch", m.Name)
+	}
+
+	remote := fmt.Sprintf(
+		"DIRAUDITOR_LAB=1 /opt/dirauditor scan --provider %s --server %s --domain %s --user %s --password-stdin %s --catalogue /opt/dirauditor-catalogue --packs '' --out /tmp/lab-out --lang en >&2; cat /tmp/lab-out/report.json",
+		shQuote(p.Provider), shQuote(m.IP), shQuote(m.Domain), shQuote(user), tls)
+	rep := filepath.Join(outDir, "report.json")
+	j.Logf("scan %s (%s) from scanner %s", m.Name, p.Provider, sc.Name)
+	if err := sshCaptureToFile(ctx, j, sc.IP, remote, cr.AuditPassword, rep); err != nil {
+		return "", err
+	}
+	return rep, nil
+}
+
+// ldapsPin fetches the SHA-256 fingerprint of a target's LDAPS certificate,
+// from the scanner (so it matches what the scan will actually connect to).
+func ldapsPin(ctx context.Context, j *Job, scannerIP, targetIP string) (string, error) {
+	cmd := fmt.Sprintf("echo | openssl s_client -connect %s:636 -servername %s 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f'",
+		targetIP, targetIP)
+	out, err := sshOut(ctx, scannerIP, cmd)
+	return strings.TrimSpace(out), err
 }
 
 // verify runs the repo's verify tool against a report and the machine's expect
@@ -263,7 +276,42 @@ func sshCaptureToFile(ctx context.Context, j *Job, ip, remoteCmd, stdin, outFile
 	return os.WriteFile(outFile, []byte(s), 0o644)
 }
 
+// sshOut runs a remote command and returns its stdout (no stdin, not streamed).
+func sshOut(ctx context.Context, ip, remoteCmd string) (string, error) {
+	exe, err := exec.LookPath("ssh")
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "root@"+ip, remoteCmd)
+	out, err := cmd.Output()
+	return string(out), err
+}
+
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// shortHost derives a lab DC hostname from the machine name (lowercase, only
+// letters, digits and hyphens), falling back to the first domain label.
+func shortHost(m *Machine) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(m.Name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b.WriteRune(r)
+		}
+	}
+	h := strings.Trim(b.String(), "-")
+	if h == "" {
+		h = netbios(m.Domain)
+		h = strings.ToLower(h)
+	}
+	if len(h) > 15 {
+		h = h[:15]
+	}
+	if h == "" {
+		h = "dc1"
+	}
+	return h
+}
 
 // netbios derives a NetBIOS-ish name from a DNS domain (first label, upper).
 func netbios(domain string) string {

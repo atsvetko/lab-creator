@@ -31,7 +31,7 @@ type Lab struct {
 // Machine is one lab VM.
 type Machine struct {
 	Name       string `yaml:"name" json:"name"`               // Hyper-V VM name
-	Kind       string `yaml:"kind" json:"kind"`               // windows-dc | alt-dc
+	Kind       string `yaml:"kind" json:"kind"`               // windows-dc | alt-domen | red-adm | ald-pro | linux-scanner
 	ISO        string `yaml:"iso" json:"iso"`                 // install ISO path (you supply it)
 	Domain     string `yaml:"domain" json:"domain"`           // e.g. da.test or alt.test
 	IP         string `yaml:"ip" json:"ip"`                   // static IP on the lab switch
@@ -122,7 +122,11 @@ func (l *Lab) Validate() error {
 	}
 	seen := map[string]bool{}
 	ips := map[string]bool{}
+	scanners := 0
 	for _, m := range l.Machines {
+		if m.isScanner() {
+			scanners++
+		}
 		if !nameRe.MatchString(m.Name) {
 			add("machine name %q is invalid", m.Name)
 		}
@@ -130,10 +134,12 @@ func (l *Lab) Validate() error {
 			add("duplicate machine name %q", m.Name)
 		}
 		seen[strings.ToLower(m.Name)] = true
-		if _, ok := plugin(m.Kind); !ok {
+		p, ok := plugin(m.Kind)
+		if !ok {
 			add("%s: unknown kind %q", m.Name, m.Kind)
 		}
-		if !domainRe.MatchString(m.Domain) {
+		// The scanner is not domain-joined, so it has no domain; every target does.
+		if !(ok && p.Scanner) && !domainRe.MatchString(m.Domain) {
 			add("%s: domain %q is invalid", m.Name, m.Domain)
 		}
 		if !ipRe.MatchString(m.IP) {
@@ -145,6 +151,9 @@ func (l *Lab) Validate() error {
 		if m.Prefix < 1 || m.Prefix > 32 {
 			add("%s: prefix must be 1..32", m.Name)
 		}
+	}
+	if scanners > 1 {
+		add("only one scanner machine is allowed (kind linux-scanner); all scans run from it")
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("lab config invalid:\n  - %s", strings.Join(errs, "\n  - "))
@@ -160,4 +169,21 @@ func (l *Lab) Machine(name string) *Machine {
 		}
 	}
 	return nil
+}
+
+// Scanner returns the dedicated scanner machine (the non-joined Linux VM that
+// runs every scan), or nil if the lab has none.
+func (l *Lab) Scanner() *Machine {
+	for i := range l.Machines {
+		if p, ok := plugin(l.Machines[i].Kind); ok && p.Scanner {
+			return &l.Machines[i]
+		}
+	}
+	return nil
+}
+
+// isScanner reports whether a machine is the scanner (not a scan target).
+func (m *Machine) isScanner() bool {
+	p, ok := plugin(m.Kind)
+	return ok && p.Scanner
 }
