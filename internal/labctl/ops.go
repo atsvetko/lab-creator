@@ -99,8 +99,12 @@ Write-Host 'windows provisioning done'
 // seeds the deliberately-weak fixtures. Key-based SSH to root@<ip> is assumed.
 func provisionLinux(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
 	p, _ := plugin(m.Kind)
-	env := fmt.Sprintf("DIRAUDITOR_LAB=1 LAB_REALM=%s LAB_DOMAIN=%s LAB_HOST=%s LAB_IP=%s LAB_ADMIN_PASSWORD=%s",
+	user := m.sshUser(l)
+	vars := fmt.Sprintf("DIRAUDITOR_LAB=1 LAB_REALM=%s LAB_DOMAIN=%s LAB_HOST=%s LAB_IP=%s LAB_ADMIN_PASSWORD=%s",
 		shQuote(strings.ToUpper(m.Domain)), shQuote(m.Domain), shQuote(shortHost(m)), shQuote(m.IP), shQuote(cr.AdminPassword))
+	// `env VAR=… bash -s`, wrapped in sudo when not logging in as root, so the
+	// variables survive the privilege change (sudo resets the environment).
+	remote := priv(user, "env "+vars+" bash -s")
 
 	type step struct {
 		name, path string
@@ -121,8 +125,8 @@ func provisionLinux(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) e
 			}
 			return fmt.Errorf("missing %s (is repo_dir correct?)", s.path)
 		}
-		j.Logf("%s: %s over ssh to %s", m.Kind, s.name, m.IP)
-		if err := sshScript(ctx, j, m.IP, env+" bash -s", string(b)); err != nil {
+		j.Logf("%s: %s over ssh to %s@%s", m.Kind, s.name, user, m.IP)
+		if err := sshScript(ctx, j, user, m.IP, remote, string(b)); err != nil {
 			return err
 		}
 	}
@@ -133,8 +137,9 @@ func provisionLinux(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) e
 // and has no directory of its own, so there is nothing to promote — we only
 // confirm we can reach it over SSH (the tool is copied there at scan time).
 func provisionScanner(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) error {
-	j.Logf("scanner %s: not domain-joined — no provisioning; checking SSH to root@%s", m.Name, m.IP)
-	return sshScript(ctx, j, m.IP, "bash -s", "echo scanner reachable: $(uname -a)")
+	user := m.sshUser(l)
+	j.Logf("scanner %s: not domain-joined — no provisioning; checking SSH to %s@%s", m.Name, user, m.IP)
+	return sshScript(ctx, j, user, m.IP, "bash -s", "echo scanner reachable: $(uname -a)")
 }
 
 // deployAndScan runs every scan FROM the dedicated scanner VM (a non-joined
@@ -152,17 +157,20 @@ func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr
 	outDir := filepath.Join(l.WorkDir, "reports", m.Name)
 	_ = os.MkdirAll(outDir, 0o755)
 
-	// Put the freshly built Linux binary and the catalogue on the scanner.
+	// Put the freshly built Linux binary and the catalogue on the scanner, in
+	// the login user's home — scanning is read-only and needs no privilege, so
+	// we avoid /opt (which would require root the vendor account may not have).
+	scUser := sc.sshUser(l)
 	if _, err := os.Stat(b.LinBin); err != nil {
 		return "", fmt.Errorf("built Linux binary missing: %s (run Build first)", b.LinBin)
 	}
-	if err := scp(ctx, j, b.LinBin, fmt.Sprintf("root@%s:/opt/dirauditor", sc.IP)); err != nil {
+	if err := scp(ctx, j, b.LinBin, fmt.Sprintf("%s:dirauditor", sshTarget(scUser, sc.IP))); err != nil {
 		return "", err
 	}
-	if err := scp(ctx, j, filepath.Join(l.RepoDir, "catalogue"), fmt.Sprintf("root@%s:/opt/dirauditor-catalogue", sc.IP)); err != nil {
+	if err := scp(ctx, j, filepath.Join(l.RepoDir, "catalogue"), fmt.Sprintf("%s:dirauditor-catalogue", sshTarget(scUser, sc.IP))); err != nil {
 		return "", err
 	}
-	if err := sshScript(ctx, j, sc.IP, "bash -s", "chmod +x /opt/dirauditor"); err != nil {
+	if err := sshScript(ctx, j, scUser, sc.IP, "bash -s", "chmod +x ./dirauditor"); err != nil {
 		return "", err
 	}
 
@@ -175,7 +183,7 @@ func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr
 	// plaintext simple bind on the isolated switch.
 	tls := "--tls none --insecure-plaintext"
 	if p.LDAPS {
-		pin, err := ldapsPin(ctx, j, sc.IP, m.IP)
+		pin, err := ldapsPin(ctx, j, scUser, sc.IP, m.IP)
 		if err != nil || pin == "" {
 			j.Logf("%s: could not fetch LDAPS pin from %s (%v) — the scan will fail closed rather than drop encryption; check the DC is up and serving 636", m.Name, m.IP, err)
 			return "", fmt.Errorf("no LDAPS certificate from %s:636", m.IP)
@@ -187,11 +195,11 @@ func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr
 	}
 
 	remote := fmt.Sprintf(
-		"DIRAUDITOR_LAB=1 /opt/dirauditor scan --provider %s --server %s --domain %s --user %s --password-stdin %s --catalogue /opt/dirauditor-catalogue --packs '' --out /tmp/lab-out --lang en >&2; cat /tmp/lab-out/report.json",
+		"DIRAUDITOR_LAB=1 ./dirauditor scan --provider %s --server %s --domain %s --user %s --password-stdin %s --catalogue ./dirauditor-catalogue --packs '' --out ./lab-out --lang en >&2; cat ./lab-out/report.json",
 		shQuote(p.Provider), shQuote(m.IP), shQuote(m.Domain), shQuote(user), tls)
 	rep := filepath.Join(outDir, "report.json")
-	j.Logf("scan %s (%s) from scanner %s", m.Name, p.Provider, sc.Name)
-	if err := sshCaptureToFile(ctx, j, sc.IP, remote, cr.AuditPassword, rep); err != nil {
+	j.Logf("scan %s (%s) from scanner %s@%s", m.Name, p.Provider, scUser, sc.Name)
+	if err := sshCaptureToFile(ctx, j, scUser, sc.IP, remote, cr.AuditPassword, rep); err != nil {
 		return "", err
 	}
 	return rep, nil
@@ -199,10 +207,10 @@ func deployAndScan(ctx context.Context, j *Job, l *Lab, b *Built, m *Machine, cr
 
 // ldapsPin fetches the SHA-256 fingerprint of a target's LDAPS certificate,
 // from the scanner (so it matches what the scan will actually connect to).
-func ldapsPin(ctx context.Context, j *Job, scannerIP, targetIP string) (string, error) {
+func ldapsPin(ctx context.Context, j *Job, scannerUser, scannerIP, targetIP string) (string, error) {
 	cmd := fmt.Sprintf("echo | openssl s_client -connect %s:636 -servername %s 2>/dev/null | openssl x509 -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f'",
 		targetIP, targetIP)
-	out, err := sshOut(ctx, scannerIP, cmd)
+	out, err := sshOut(ctx, scannerUser, scannerIP, cmd)
 	return strings.TrimSpace(out), err
 }
 
@@ -235,10 +243,29 @@ func psEnv(ctx context.Context, j *Job, script string, env map[string]string) er
 	return streamCmd(ctx, j, cmd)
 }
 
-func sshScript(ctx context.Context, j *Job, ip, remoteCmd, stdin string) error {
+// priv wraps a remote command in sudo when the SSH login is not root. Vendor
+// DCs disable root SSH, so provisioning connects as a sudo-capable admin; the
+// install/promote scripts still need root, which sudo supplies. Read-only scans
+// never go through priv — the auditor needs no privilege to bind over LDAP.
+func priv(user, cmd string) string {
+	if user == "" || user == "root" {
+		return cmd
+	}
+	return "sudo " + cmd
+}
+
+func sshScript(ctx context.Context, j *Job, user, ip, remoteCmd, stdin string) error {
 	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-		"root@" + ip, remoteCmd}
+		sshTarget(user, ip), remoteCmd}
 	return runStdin(ctx, j, "", stdin, "ssh", args...)
+}
+
+// sshTarget builds user@ip, defaulting to root when no user is given.
+func sshTarget(user, ip string) string {
+	if user == "" {
+		user = "root"
+	}
+	return user + "@" + ip
 }
 
 func scp(ctx context.Context, j *Job, src, dst string) error {
@@ -256,12 +283,12 @@ func scp(ctx context.Context, j *Job, src, dst string) error {
 
 // sshCaptureToFile runs a remote command (password on stdin) and saves its
 // stdout (the report JSON printed last) to a local file.
-func sshCaptureToFile(ctx context.Context, j *Job, ip, remoteCmd, stdin, outFile string) error {
+func sshCaptureToFile(ctx context.Context, j *Job, user, ip, remoteCmd, stdin, outFile string) error {
 	exe, err := exec.LookPath("ssh")
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "root@"+ip, remoteCmd)
+	cmd := exec.CommandContext(ctx, exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", sshTarget(user, ip), remoteCmd)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	if err != nil {
@@ -277,12 +304,12 @@ func sshCaptureToFile(ctx context.Context, j *Job, ip, remoteCmd, stdin, outFile
 }
 
 // sshOut runs a remote command and returns its stdout (no stdin, not streamed).
-func sshOut(ctx context.Context, ip, remoteCmd string) (string, error) {
+func sshOut(ctx context.Context, user, ip, remoteCmd string) (string, error) {
 	exe, err := exec.LookPath("ssh")
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "root@"+ip, remoteCmd)
+	cmd := exec.CommandContext(ctx, exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", sshTarget(user, ip), remoteCmd)
 	out, err := cmd.Output()
 	return string(out), err
 }

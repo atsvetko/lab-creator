@@ -7,6 +7,7 @@ package labctl
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -23,6 +24,7 @@ type Lab struct {
 	RepoDir  string    `yaml:"repo_dir" json:"repo_dir"` // local clone of directory-auditor to build
 	Ref      string    `yaml:"ref" json:"ref"`           // git ref to build (branch, tag or commit); default main
 	WorkDir  string    `yaml:"work_dir" json:"work_dir"` // where builds, unattend files and reports land
+	SSHUser  string    `yaml:"ssh_user" json:"ssh_user"` // default SSH login for Linux guests; vendor DCs disable root, so this is usually a sudo-capable admin (e.g. altadmin), not root
 	Machines []Machine `yaml:"machines" json:"machines"`
 
 	path string `yaml:"-"`
@@ -40,6 +42,7 @@ type Machine struct {
 	MemGB      int    `yaml:"mem_gb" json:"mem_gb"`           // RAM in GB (default 4)
 	DiskGB     int    `yaml:"disk_gb" json:"disk_gb"`         // system disk in GB (default 60)
 	ForestMode string `yaml:"forest_mode" json:"forest_mode"` // windows-dc only
+	SSHUser    string `yaml:"ssh_user" json:"ssh_user"`       // per-machine SSH login override (Linux guests); falls back to the lab default, then root
 	Expect     string `yaml:"expect" json:"expect"`           // optional verify expectation file
 }
 
@@ -120,6 +123,18 @@ func (l *Lab) Validate() error {
 	if strings.TrimSpace(l.RepoDir) == "" {
 		add("repo_dir is required (the local clone of directory-auditor to build)")
 	}
+	// If a subnet is declared, every machine IP must fall inside it. The live
+	// lab had two labs collide on 10.10.10.0/24 and one had to be re-IP'd to
+	// 10.10.20.0/24; catching an out-of-subnet IP here turns that into a config
+	// error before any VM is created.
+	var subnet *net.IPNet
+	if strings.TrimSpace(l.Subnet) != "" {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(l.Subnet)); err != nil {
+			add("subnet %q is not valid CIDR (e.g. 10.10.20.0/24)", l.Subnet)
+		} else {
+			subnet = n
+		}
+	}
 	seen := map[string]bool{}
 	ips := map[string]bool{}
 	scanners := 0
@@ -146,6 +161,10 @@ func (l *Lab) Validate() error {
 			add("%s: ip %q is invalid", m.Name, m.IP)
 		} else if ips[m.IP] {
 			add("duplicate ip %s", m.IP)
+		} else if subnet != nil {
+			if ip := net.ParseIP(m.IP); ip == nil || !subnet.Contains(ip) {
+				add("%s: ip %s is outside the lab subnet %s", m.Name, m.IP, l.Subnet)
+			}
 		}
 		ips[m.IP] = true
 		if m.Prefix < 1 || m.Prefix > 32 {
@@ -186,4 +205,19 @@ func (l *Lab) Scanner() *Machine {
 func (m *Machine) isScanner() bool {
 	p, ok := plugin(m.Kind)
 	return ok && p.Scanner
+}
+
+// sshUser resolves the SSH login for a Linux guest: the per-machine override,
+// then the lab default, then root. Vendor DCs (Альт Домен, РЕД АДМ, ALD Pro)
+// ship with root SSH login disabled — the live lab confirmed it — so in
+// practice this is a sudo-capable admin account, and privileged provisioning
+// steps are run through sudo (see priv() in ops.go).
+func (m *Machine) sshUser(l *Lab) string {
+	if m.SSHUser != "" {
+		return m.SSHUser
+	}
+	if l != nil && l.SSHUser != "" {
+		return l.SSHUser
+	}
+	return "root"
 }

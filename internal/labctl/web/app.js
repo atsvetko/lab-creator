@@ -96,6 +96,7 @@ $("runall").onclick = ()=>start(()=>api("/api/run-all",{}));
 function fillCfg(){
   $("cfgpath").textContent = ""; $("cfgerr").classList.add("hidden");
   $("f_repo").value=lab.repo_dir||""; $("f_switch").value=lab.switch||""; $("f_work").value=lab.work_dir||""; $("f_ref").value=lab.ref||"";
+  $("f_subnet").value=lab.subnet||""; $("f_ssh").value=lab.ssh_user||"";
   const mr = $("mrows"); mr.innerHTML="";
   (lab.machines||[]).forEach((m,i)=>mr.appendChild(mrow(m,i)));
 }
@@ -112,6 +113,7 @@ function mrow(m,i){
     f("domain",m.domain,"da.test")+f("ip",m.ip,"10.55.0.10")+
     `<button class="del">✕</button>`+
     f("iso",m.iso,"path to install ISO")+f("forest_mode",m.forest_mode,"Win2016")+
+    f("ssh_user",m.ssh_user,"blank = lab default")+
     f("expect",m.expect,"testdata/lab/windows-expect.yaml")+f("cpu",m.cpu)+f("mem_gb",m.mem_gb)+f("disk_gb",m.disk_gb);
   d.querySelector(".del").onclick=()=>{ lab.machines.splice(i,1); fillCfg(); };
   return d;
@@ -119,12 +121,12 @@ function mrow(m,i){
 $("addm").onclick = ()=>{ lab.machines=lab.machines||[]; lab.machines.push({name:"NEW",kind:(kinds[0]&&kinds[0].kind)||"windows-dc",domain:"da.test",ip:"10.55.0.20",prefix:24,cpu:2,mem_gb:4,disk_gb:60,forest_mode:"Win2016"}); fillCfg(); };
 $("savecfg").onclick = async ()=>{
   const g=id=>$(id).value.trim();
-  const next = {name:lab.name,subnet:lab.subnet,repo_dir:g("f_repo"),switch:g("f_switch"),work_dir:g("f_work"),ref:g("f_ref"),machines:[]};
+  const next = {name:lab.name,subnet:g("f_subnet"),ssh_user:g("f_ssh"),repo_dir:g("f_repo"),switch:g("f_switch"),work_dir:g("f_work"),ref:g("f_ref"),machines:[]};
   document.querySelectorAll("#mrows .mrow").forEach(d=>{
     const v=k=>{const e=d.querySelector(".m_"+k);return e?e.value.trim():"";};
     const n=k=>parseInt(v(k)||"0",10);
     next.machines.push({name:v("name"),kind:v("kind"),domain:v("domain"),ip:v("ip"),iso:v("iso"),
-      forest_mode:v("forest_mode"),expect:v("expect"),prefix:24,cpu:n("cpu"),mem_gb:n("mem_gb"),disk_gb:n("disk_gb")});
+      forest_mode:v("forest_mode"),ssh_user:v("ssh_user"),expect:v("expect"),prefix:24,cpu:n("cpu"),mem_gb:n("mem_gb"),disk_gb:n("disk_gb")});
   });
   const r = await api("/api/config", next);
   if(!r.ok){ const e=$("cfgerr"); e.textContent=r.error; e.classList.remove("hidden"); return; }
