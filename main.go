@@ -53,12 +53,14 @@ func main() {
 		} else {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			fmt.Fprintln(os.Stderr, "hint: fix", *labPath, "or run `labctl init …` to scaffold it")
+			pauseIfDoubleClicked()
 			os.Exit(1)
 		}
 	}
 	_, url, err := labctl.Serve(lab)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		pauseIfDoubleClicked()
 		os.Exit(1)
 	}
 	fmt.Println("Directory Auditor lab control panel")
