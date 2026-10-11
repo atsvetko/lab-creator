@@ -13,8 +13,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,10 +42,19 @@ func main() {
 	flag.Parse()
 
 	lab, err := labctl.Load(*labPath)
+	fresh := false
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		fmt.Fprintln(os.Stderr, "hint: copy lab.example.yaml to", *labPath, "and edit it")
-		os.Exit(1)
+		// No lab file yet: open the UI anyway with a default, empty lab so the
+		// user can build it in the config editor (the first Save writes the
+		// file). Any other error — a malformed or invalid file — is still fatal.
+		if errors.Is(err, fs.ErrNotExist) {
+			lab = labctl.NewDefault(*labPath)
+			fresh = true
+		} else {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			fmt.Fprintln(os.Stderr, "hint: fix", *labPath, "or run `labctl init …` to scaffold it")
+			os.Exit(1)
+		}
 	}
 	_, url, err := labctl.Serve(lab)
 	if err != nil {
@@ -51,7 +62,11 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("Directory Auditor lab control panel")
-	fmt.Println("  lab:", lab.Path())
+	if fresh {
+		fmt.Println("  lab:", lab.Path(), "(new — nothing saved yet; build it on the Config screen)")
+	} else {
+		fmt.Println("  lab:", lab.Path())
+	}
 	fmt.Println("  open:", url)
 	if ok, msg := labctl.HostOK(); !ok {
 		fmt.Println("  note:", msg)

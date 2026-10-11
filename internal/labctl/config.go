@@ -70,6 +70,15 @@ func Load(path string) (*Lab, error) {
 	return &l, l.Validate()
 }
 
+// NewDefault returns an unsaved lab with sensible defaults and no machines,
+// used when no lab file exists yet so the web UI can still open and the user
+// can build the lab in the config editor (the first Save writes the file).
+func NewDefault(path string) *Lab {
+	l := &Lab{Name: "lab", Subnet: "10.10.30.0/24", path: path}
+	l.defaults()
+	return l
+}
+
 // Save writes the lab file back after applying defaults; it validates first.
 func (l *Lab) Save() error {
 	l.defaults()
