@@ -1,11 +1,15 @@
 // Command labctl is the Directory Auditor lab control panel. It runs on the
-// Hyper-V host and serves a local web UI that builds the auditor from a local
-// clone, creates and provisions the lab VMs (Windows AD and Samba/Альт Домен
-// DCs) from ISOs you supply, and deploys the freshly built binary to scan them.
+// Hyper-V host and either serves a local web UI or drives the lab from the
+// command line: it builds the auditor from a local clone, creates and
+// provisions the lab VMs (Windows AD and Samba/Альт Домен DCs) from ISOs you
+// supply, and deploys the freshly built binary to scan them.
 //
 // It is a separate tool from the read-only auditor and is never linked into it.
 //
-//	labctl [--lab lab.yaml] [--no-browser]
+//	labctl [--lab lab.yaml] [--no-browser]   # web UI (default)
+//	labctl init --name w2025 --iso <win2025.iso> --domain da.test --ip 10.10.30.10
+//	labctl up                                # build + create + provision + snapshot
+//	labctl help                              # all sub-commands
 package main
 
 import (
@@ -20,6 +24,17 @@ import (
 )
 
 func main() {
+	// A sub-command (init, build, up, create, provision, scan, …) runs headless
+	// and exits. Anything else — no args, or just the server flags — falls
+	// through to the web UI, so the bare `labctl` invocation is unchanged.
+	// `serve` is the explicit name for the UI: strip it and parse its flags.
+	args := os.Args[1:]
+	if len(args) > 0 && args[0] == "serve" {
+		os.Args = append(os.Args[:1:1], args[1:]...) // strip "serve"; parse its flags below
+	} else if len(args) > 0 && args[0][0] != '-' {
+		os.Exit(labctl.RunCLI(args))
+	}
+
 	labPath := flag.String("lab", "lab.yaml", "lab definition file")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser; print the address only")
 	flag.Parse()
