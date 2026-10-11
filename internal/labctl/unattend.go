@@ -1,7 +1,9 @@
 package labctl
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,7 +21,7 @@ func answerISO(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) (strin
 		j.Logf("%s: no automated answer file for kind %q — install the OS via the console, then Provision", m.Name, m.Kind)
 		return "", nil
 	}
-	dir := filepath.Join(l.WorkDir, "unattend", m.Name)
+	dir := filepath.Join(l.Work(), "unattend", m.Name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -33,7 +35,7 @@ func answerISO(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) (strin
 		j.Logf("%s: oscdimg (Windows ADK) not found — install the OS via the console, then Provision", m.Name)
 		return "", nil
 	}
-	iso := filepath.Join(l.WorkDir, "unattend", m.Name+".iso")
+	iso := filepath.Join(l.Work(), "unattend", m.Name+".iso")
 	if err := run(ctx, j, "", oscd, "-n", "-m", dir, iso); err != nil {
 		return "", err
 	}
@@ -46,10 +48,8 @@ func answerISO(ctx context.Context, j *Job, l *Lab, m *Machine, cr Creds) (strin
 // and enables auto-logon once. It intentionally does not promote the DC — that
 // is Provision's job, so the same path works for a hand-installed VM.
 func winAutounattend(m *Machine, adminPw string) string {
-	host := m.Name
-	if len(host) > 15 {
-		host = host[:15]
-	}
+	host := xmlEscape(shortHost(m))
+	adminPw = xmlEscape(adminPw)
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">
@@ -92,4 +92,12 @@ func winAutounattend(m *Machine, adminPw string) string {
   </settings>
 </unattend>
 `, host, adminPw, adminPw)
+}
+
+// xmlEscape makes a value safe inside an XML text node (a password with & or <
+// would otherwise break the answer file and stall the install).
+func xmlEscape(s string) string {
+	var b bytes.Buffer
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
 }

@@ -1,14 +1,14 @@
-// Command labctl is the Directory Auditor lab control panel. It runs on the
-// Hyper-V host and either serves a local web UI or drives the lab from the
-// command line: it builds the auditor from a local clone, creates and
-// provisions the lab VMs (Windows AD and Samba/Альт Домен DCs) from ISOs you
-// supply, and deploys the freshly built binary to scan them.
-//
-// It is a separate tool from the read-only auditor and is never linked into it.
+// Command labctl builds directory test labs on Hyper-V. It serves a local web
+// UI or runs headless: it creates VMs from ISOs you supply, promotes them to
+// domain controllers (Windows AD, Samba AD DC, FreeIPA), seeds deliberately
+// weak objects, checkpoints a baseline, and describes the lab in
+// lab-info.json for whatever tool you test with. Its provisioning scripts are
+// embedded; nothing else is needed on the host.
 //
 //	labctl [--lab lab.yaml] [--no-browser]   # web UI (default)
-//	labctl init --name w2025 --iso <win2025.iso> --domain da.test --ip 10.10.30.10
-//	labctl up                                # build + create + provision + snapshot
+//	labctl init --name w2025 --iso <win2025.iso> --domain corp.test --ip 10.10.30.10
+//	labctl doctor                            # Setup checklist
+//	labctl up                                # create + provision + snapshot
 //	labctl help                              # all sub-commands
 package main
 
@@ -37,9 +37,12 @@ func main() {
 		os.Exit(labctl.RunCLI(args))
 	}
 
-	labPath := flag.String("lab", "lab.yaml", "lab definition file")
+	labPath := flag.String("lab", "", "lab file (default: lab.yaml here, else next to labctl)")
 	noBrowser := flag.Bool("no-browser", false, "do not open a browser; print the address only")
 	flag.Parse()
+	if *labPath == "" {
+		*labPath = labctl.DefaultLabPath()
+	}
 
 	lab, err := labctl.Load(*labPath)
 	fresh := false
@@ -63,9 +66,12 @@ func main() {
 		pauseIfDoubleClicked()
 		os.Exit(1)
 	}
-	fmt.Println("Directory Auditor lab control panel")
+	fmt.Println("lab-creator control panel")
+	for _, w := range lab.Warnings() {
+		fmt.Println("  note:", w)
+	}
 	if fresh {
-		fmt.Println("  lab:", lab.Path(), "(new — nothing saved yet; build it on the Config screen)")
+		fmt.Println("  lab:", lab.Path(), "(new — nothing saved yet; add machines on the Config screen)")
 	} else {
 		fmt.Println("  lab:", lab.Path())
 	}

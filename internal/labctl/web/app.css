@@ -100,7 +100,7 @@ select.inp{cursor:pointer}
 .rowact button{border:1px solid var(--line);background:transparent;color:var(--accent);border-radius:999px;padding:3px 10px;font-size:11.5px;font-weight:600;cursor:pointer}
 .rowact button:hover{background:var(--soft)}
 .rowact button:disabled{opacity:.45;cursor:not-allowed}
-.pass{color:var(--ok);font-weight:700} .fail{color:var(--err);font-weight:700}
+
 
 /* config editor rows */
 .mrow{border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:10px;display:grid;grid-template-columns:repeat(4,1fr) auto;gap:10px;align-items:end}
@@ -112,3 +112,14 @@ select.inp{cursor:pointer}
 .console .cmd{color:#7fd1ff} .console .err{color:#ff8a8a} .console .me{color:#a0e6a0}
 
 @media(max-width:720px){.grid,.grid2{grid-template-columns:1fr}.mrow{grid-template-columns:1fr 1fr}}
+
+/* setup checklist */
+.checks{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:8px}
+.checks li{display:flex;gap:10px;align-items:flex-start;padding:9px 12px;border-bottom:1px solid var(--line)}
+.checks li:last-child{border-bottom:0}
+.checks .ic{flex:none;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;background:var(--ok)}
+.checks li.c-fail .ic{background:var(--err)}
+.checks li.c-warn .ic{background:var(--warn);color:#3a2b00}
+.checks .lbl{font-weight:600}
+.checks .det{color:var(--muted);font-size:12.5px;margin-top:2px;word-break:break-word}
+a.btn{text-decoration:none;display:inline-block}

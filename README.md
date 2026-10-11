@@ -1,169 +1,148 @@
 # lab-creator
 
-A small control panel you run on a **Hyper-V host** to stand up disposable
-directory-services test labs and exercise a tool against them — build it from
-source, create and provision the lab VMs from ISOs you supply, then deploy the
-freshly built binary and scan each target, all from one local web page with a
-live log.
+Builds **directory test labs on demand** on a Hyper-V host. You say which
+directories you want — Windows Active Directory, **Альт Домен**, **РЕД АДМ**,
+**ALD Pro** — and `labctl` creates the VMs from ISOs you supply, promotes them to
+domain controllers, seeds deliberately weak objects, checkpoints a baseline, and
+describes the result in `lab-info.json` so any testing tool can use the lab.
 
-It was built to drive the [Directory Auditor](https://github.com/atsvetko/directory-auditor)
-labs, and it reads that project's `tools/lab/**` provisioning scripts and
-`*-expect.yaml` assertion files from the checkout you point it at.
+One binary. The provisioning scripts are embedded; the host needs no Go, git,
+Python or source checkout.
 
-OS support is **pluggable** — one plugin per directory product, registered in
-`internal/labctl/plugins.go`:
+```
+Hyper-V host ── labctl (web UI on 127.0.0.1 + one-time token, or CLI)
+  ├─ setup:      checklist — host, rights, isolated switch, config, ISOs, credentials
+  ├─ create:     New-VM from your ISO on an internal switch (created if missing)
+  ├─ provision:  promote to DC with the VENDOR's packages + seed weak objects
+  │              (Windows: PowerShell Direct · Linux: SSH)
+  ├─ snapshot:   baseline checkpoint
+  ├─ reset:      back to the baseline in seconds
+  └─ lab-info:   lab-info.json — directories, endpoints, accounts (no passwords)
+```
 
-| `kind`          | Product                                | Directory tech    | Provider | Guest OS |
-|-----------------|----------------------------------------|-------------------|----------|----------|
-| `windows-dc`    | Windows Server — Active Directory DC   | AD                | `ad`     | Windows  |
-| `alt-domen`     | **Альт Домен** (Basealt ALT)           | Samba AD DC       | `samba`  | Linux    |
-| `red-adm`       | **РЕД АДМ** (RED OS)                    | Samba DC          | `samba`  | Linux    |
-| `ald-pro`       | **ALD Pro** (Astra Linux)              | FreeIPA           | `freeipa`| Linux    |
-| `linux-scanner` | Scanner — audit workstation            | none (not joined) | —        | Linux    |
+Design and roadmap: [docs/ARCHITECTURE-v2.md](docs/ARCHITECTURE-v2.md).
+
+## Supported guests
+
+| `kind`          | Product                                | Directory      | Guest OS |
+|-----------------|----------------------------------------|----------------|----------|
+| `windows-dc`    | Windows Server — Active Directory DC   | `ad`           | Windows  |
+| `alt-domen`     | **Альт Домен** (Basealt ALT)           | `samba`        | Linux    |
+| `red-adm`       | **РЕД АДМ** (RED OS)                   | `samba`        | Linux    |
+| `ald-pro`       | **ALD Pro** (Astra Linux)              | `freeipa`      | Linux    |
+| `linux-scanner` | Linux workstation for testing tools    | none (not joined) | Linux |
 
 Each Linux target is provisioned with the **vendor's own** directory packages,
-from the distribution's own repositories, at the version that vendor ships — the
-lab never installs upstream/generic Samba or FreeIPA, because the point is to
-audit what the vendor actually ships:
+from the distribution's own repositories — never upstream/generic Samba or
+FreeIPA, because the point is to test what the vendor actually ships:
 
 - **Альт Домен** — `apt-get install task-samba-dc` on ALT ([docs.altlinux.org](https://docs.altlinux.org/ru-RU/cloud/10.0/html/cloud-server/sambadc--chapter.html)).
 - **РЕД АДМ** — РЕД АДМ is **not** FreeIPA; its FAQ states FreeIPA is not supported and the Standard edition uses RED OS's base Samba DC ([redadm.red-soft.ru/product/faq](https://redadm.red-soft.ru/product/faq/)). Provisioned with the RED OS vendor Samba-DC packages.
 - **ALD Pro** — FreeIPA-based ([wiki.astralinux.ru](https://wiki.astralinux.ru/pages/viewpage.action?pageId=263042308)), installed with the vendor's `aldpro-mp` and promoted with `aldpro-server-install` ([install guide](https://t-wiki.ru/doku.php?id=astralinux:aldproinstall)) — never generic `ipa-server-install`.
 
-The vendor scripts refuse to run on an unexpected OS (checked via `/etc/os-release`)
-rather than fall back to an upstream package, and record the installed vendor
-version as evidence.
-
-A plugin declares its provider, guest OS, VM firmware, scan transport and how to
-provision the domain; `create`, `deploy`, `scan` and `verify` are generic.
-Adding another product is adding a `Plugin` (and, if needed, its
-`tools/lab/<name>/` scripts in the target repo). Legacy/short names resolve as
-aliases (`alt-dc`, `alt-linux`, `samba` → `alt-domen`; `scanner` → `linux-scanner`).
-
-```
-Hyper-V host ── labctl (this tool, 127.0.0.1 + one-time token)
-  ├─ build:      git fetch + go build  (Windows + Linux binaries)
-  ├─ create:     New-VM from your ISO on an isolated switch
-  ├─ provision:  promote to DC with the VENDOR's packages + seed weak fixtures
-  │              (Windows: PowerShell Direct · Linux: SSH)
-  ├─ snapshot:   vuln-baseline checkpoint
-  └─ run:        restore → scan (from the non-joined scanner VM) → verify
-
-All scans run from one dedicated Linux scanner VM that is NOT domain-joined; it
-binds to each DC over the network with the audit account, exactly as an auditor
-would from an admin workstation.
-```
-
-## Why
-
-Directory security checks need to be validated against *real* domain
-controllers, not only synthetic fixtures. This gives you a repeatable, mostly
-unattended way to do that locally: deterministic baselines via checkpoints, one
-click to reset-and-scan everything, and a config you edit in the browser.
-
 ## Install & run
 
-On the host (Windows with Hyper-V, PowerShell, Go and git on `PATH`):
+On the Hyper-V host (Windows 10/11 Pro or Enterprise, or Windows Server, with Hyper-V enabled):
 
 ```powershell
-git clone https://github.com/atsvetko/lab-creator
-cd lab-creator
-copy lab.example.yaml lab.yaml        # then edit, or edit it in the UI
-go run .                              # or: go build -o labctl.exe . ; .\labctl.exe
+go build -o labctl.exe .        # until signed releases are published
+.\labctl.exe                    # opens the web UI
 ```
 
-It prints a `http://127.0.0.1:<port>/?t=<token>` URL (loopback + one-time token)
-and opens it.
+Run it as administrator the first time (it creates the internal switch and the
+host's address on it); after that, membership in **Hyper-V Administrators** is
+enough. `labctl doctor` prints the same checklist as the UI.
 
 ## The panel
 
-The UI mirrors Directory Auditor's own look — a pivot across three stages with a
-browser-window frame and a live console pinned below.
+1. **Setup** — a checklist that must be green before any VM is touched (Windows
+   host, Hyper-V, rights, isolated switch, saved and valid config, at least one
+   directory server, ISOs, credentials, OpenSSH client for Linux guests), plus
+   the lab credentials. Credentials live in memory for the session only.
+2. **Config** — add or remove machines; set kinds, domains, IPs, ISOs and sizes.
+   Saving writes `lab.yaml`.
+3. **Lab** — a row per machine with its VM state and baseline, and the actions
+   that are valid right now (others are disabled with the reason as a tooltip),
+   plus **Reset all** and **Download lab-info.json**.
 
-1. **Setup** — the admin password (provisioning) and the ordinary audit account
-   (scans), held in memory for the session only and never written to the config;
-   and **Build**, which fetches and builds the chosen git ref (`main` by default,
-   or any tag/branch/commit) into `work_dir\bin`, for Windows and Linux.
-2. **Lab** — a row per machine with its VM state, a kind pill coloured by guest
-   OS, whether a `vuln-baseline` checkpoint exists, the last scan result, and
-   per-machine actions (create · provision · snapshot · reset · start · stop ·
-   scan), plus **Reset + scan all**. Every scan runs from the `linux-scanner`
-   VM against the selected target; the scanner itself is not a scan target.
-3. **Config** — add/remove machines and set names, kinds (chosen from the
-   registered plugins), domains, IPs, ISOs and sizes; edits save back to
-   `lab.yaml`.
+The console streams the running action's log.
 
-The **console** streams the running action's log at all times.
+## Command line (and CI)
+
+```powershell
+$env:LAB_ADMIN_PASSWORD = Read-Host -AsSecureString | ConvertFrom-SecureString -AsPlainText
+$env:LAB_AUDIT_PASSWORD = Read-Host -AsSecureString | ConvertFrom-SecureString -AsPlainText
+.\labctl.exe init --name W2025 --iso D:\iso\WinServer2025_Eval.iso --domain corp.test --ip 10.10.30.10
+.\labctl.exe doctor
+.\labctl.exe up                 # create + provision + snapshot every machine
+.\labctl.exe reset --all        # back to the baseline
+.\labctl.exe info --out lab-info.json
+```
+
+`labctl help` lists every command. Exit codes: `0` ok · `1` action failed ·
+`2` usage or invalid lab file · `3` Setup not ready · `5` provisioning failed
+during `up`.
+
+The lab file defaults to `lab.yaml` in the current folder, else next to
+`labctl.exe`. A relative `work_dir` resolves next to the lab file.
 
 ## Config (`lab.yaml`)
 
+See [lab.example.yaml](lab.example.yaml). In short:
+
 ```yaml
-name: dirauditor-lab
-switch: da-lab               # Hyper-V *internal* switch (isolated, no uplink)
-repo_dir: C:\src\directory-auditor   # checkout to build and take scripts from
-ref: main
-work_dir: C:\lab\work
+name: ru-mixed
+switch: lc-lab           # internal switch; created on the first create
+subnet: 10.10.30.0/24    # .1 is the host on the lab switch
+work_dir: work
+ssh_user: altadmin       # Linux login; vendor DCs disable root SSH
 machines:
-  - { name: DA-SCANNER, kind: linux-scanner, iso: C:\iso\alt-ws.iso, ip: 10.55.0.9 }   # not joined; runs every scan
-  - { name: DA-DC-2022, kind: windows-dc, iso: C:\iso\ws2022.iso, domain: da.test,  ip: 10.55.0.10, forest_mode: Win2016, expect: testdata/lab/windows-expect.yaml }
-  - { name: DA-DC-2025, kind: windows-dc, iso: C:\iso\ws2025.iso, domain: da.test,  ip: 10.55.0.11, forest_mode: Win2025, expect: testdata/lab/windows-expect.yaml }
-  - { name: DA-ALT,     kind: alt-domen,  iso: C:\iso\alt.iso,    domain: alt.test, ip: 10.55.0.12, expect: testdata/lab/samba-expect.yaml }
-  - { name: DA-REDADM,  kind: red-adm,    iso: C:\iso\red.iso,    domain: red.test, ip: 10.55.0.13, expect: testdata/lab/samba-expect.yaml }
-  - { name: DA-ALDPRO,  kind: ald-pro,    iso: C:\iso\ald.iso,    domain: ald.test, ip: 10.55.0.14, expect: testdata/lab/freeipa-admin-expect.yaml }
+  - { name: W2025,  kind: windows-dc, iso: C:\iso\ws2025.iso, domain: corp.test, ip: 10.10.30.10, forest_mode: Win2025 }
+  - { name: ALT,    kind: alt-domen,  iso: C:\iso\alt.iso,    domain: alt.test,  ip: 10.10.30.12 }
+  - { name: ALDPRO, kind: ald-pro,    iso: C:\iso\ald.iso,    domain: ald.test,  ip: 10.10.30.14 }
 ```
 
-- `windows-dc` — promoted and seeded via `tools/lab/windows/*.ps1` over PowerShell Direct.
-- `alt-domen`, `red-adm` — Samba DC; provisioned via `tools/lab/samba/provision-vendor.sh` (vendor Samba-DC packages, OS-guarded) + `tools/lab/samba/populate.sh` over SSH.
-- `ald-pro` — FreeIPA; provisioned via `tools/lab/aldpro/provision.sh` (`aldpro-mp` + `aldpro-server-install`) + `tools/lab/freeipa/populate.sh` over SSH.
-- `linux-scanner` — not provisioned (not joined); the built Linux binary and catalogue are copied to it at scan time.
+Lab files from the Directory Auditor era (`repo_dir`, `ref`, `expect`) still
+load; those fields are ignored, reported as a note, and removed on the next save.
 
-SSH-based provisioning and scanning assume key-based `root@<ip>` access to the Linux guests.
+## Using the lab from a testing tool
 
-### Scan transport (from the non-joined scanner)
+`lab-info.json` (schema `lab-creator/lab-info/v1`) lists each directory with its
+type, domain, realm, NetBIOS name, base DN, DC address, LDAP/LDAPS/Kerberos
+endpoints and account principals. Passwords are never written to it; the tool
+gets them from the same `LAB_ADMIN_PASSWORD` / `LAB_AUDIT_PASSWORD` environment.
 
-The scanner has no Kerberos ticket, so the channel depends on the target:
+Example: point Directory Auditor at each directory in the file, after
+`labctl reset --all`, from a CI step or the scanner VM.
 
-- **Samba / FreeIPA** (`alt-domen`, `red-adm`, `ald-pro`) self-sign LDAPS, so the
-  scanner fetches and **pins** the target's LDAPS certificate and scans
-  encrypted (`--tls ldaps --pin …`). If the DC isn't serving 636 the scan
-  **fails closed** rather than dropping encryption.
-- **Windows** (`windows-dc`) — a vanilla DC has no LDAPS and the scanner can't do
-  Kerberos sealing without joining, so the scan uses a **lab-only plaintext**
-  simple bind (`--tls none --insecure-plaintext`) on the isolated switch. Give
-  the DC an LDAPS certificate (e.g. via AD CS) if you want it pinned instead.
+## What provisioning does
 
-## Prerequisites
-
-- Windows host with **Hyper-V** and PowerShell, run as Administrator.
-- **Go** (see `go.mod`) and **git** on `PATH`.
-- A checkout of the target project in `repo_dir` (its `tools/lab/**` scripts and
-  `*-expect.yaml` files are what labctl drives).
-- Optional: **oscdimg** (Windows ADK) to auto-answer Windows installs; **ssh/scp**
-  for the Linux guests; **openssl** on the scanner VM (to pin LDAPS certs).
-- A `linux-scanner` machine — every scan runs from it.
-- The install **ISOs** you provide for each OS.
+The embedded scripts live in [`content/`](content/) and refuse to run unless
+`LABCTL_LAB=1` (labctl sets it). labctl passes parameters as `LAB_*` variables,
+each with one meaning: `LAB_DNS_DOMAIN`, `LAB_REALM`, `LAB_NETBIOS`, `LAB_BASEDN`,
+`LAB_HOST`, `LAB_IP`, `LAB_PREFIX`, `LAB_ADMIN_PASSWORD`, `LAB_AUDIT_USER`,
+`LAB_AUDIT_PASSWORD`, `LAB_USER_PASSWORD`. For Linux guests they are exported at
+the top of the script piped over SSH, so secrets never appear on a command line.
 
 ## Security
 
-- Lab lives on an **isolated internal** Hyper-V switch — no route to a real network.
-- Provisioning scripts refuse unless `DIRAUDITOR_LAB=1` (labctl sets it).
-- Credentials are kept in memory for the session, not in the config file.
+- Labs are **deliberately weak**. They live on an internal or private Hyper-V
+  switch; labctl refuses an external switch.
+- Provisioning scripts refuse to run unless `LABCTL_LAB=1`.
+- Credentials are kept in memory (UI) or the environment (CLI), never in the
+  lab file or `lab-info.json`.
 - The panel binds `127.0.0.1` with a one-time token.
 
-## Status / limitations
+## Limitations (now)
 
-- The Hyper-V / PowerShell / SSH orchestration runs only on a Windows host.
-- Windows auto-install needs the ADK's `oscdimg`; without it, install the OS once
-  through the Hyper-V console, then use **provision**.
-- Linux installs (Альт Домен, РЕД АДМ, ALD Pro, scanner) are interactive in this
-  version (their preseed/kickstart varies by build); labctl takes over at
-  **provision** over SSH once the guest is up and reachable.
-- Samba targets (Альт Домен, РЕД АДМ) are scanned **remotely only**, from the
-  scanner over the network like every other target; there is no on-box scan.
-- The RED OS vendor Samba-DC package name is resolved on-box from a candidate
-  list; confirm it for your RED OS release (the script refuses rather than
-  pulling upstream).
-- One action runs at a time (the lab VMs are shared hardware).
+- Hyper-V only; the driver interface for VirtualBox, VMware and Proxmox is on
+  the roadmap.
+- Windows unattended install needs the Windows ADK's `oscdimg`; without it,
+  install the OS through the Hyper-V console, then **provision**.
+- Linux installs (Альт Домен, РЕД АДМ, ALD Pro, scanner) are interactive for
+  now; labctl takes over at **provision** over SSH. The SSH login must be able
+  to `sudo` without a password prompt.
+- One action runs at a time per labctl instance.
 
 ## Licence
 

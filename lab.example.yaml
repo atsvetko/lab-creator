@@ -1,79 +1,64 @@
-# Directory Auditor lab — copy to lab.yaml and edit (the UI can edit it too).
-# Runs on the Hyper-V host. You supply the install ISOs; the panel builds the
-# tool, creates/provisions the VMs, and scans every target FROM the dedicated
-# non-domain-joined scanner VM (kind: linux-scanner).
+# lab-creator lab — copy to lab.yaml and edit (the web UI edits it too).
+# Runs on the Hyper-V host. You supply the install ISOs; labctl creates the
+# VMs on an isolated internal switch, promotes them to domain controllers,
+# seeds deliberately weak objects, checkpoints a baseline and writes
+# lab-info.json for whatever testing tool you point at the lab.
 #
 # Each Linux target is provisioned with its VENDOR's own directory packages:
 #   alt-domen / red-adm -> vendor Samba-DC (ALT task-samba-dc / RED OS Samba DC)
 #   ald-pro             -> ALD Pro (aldpro-mp + aldpro-server-install, FreeIPA)
 # No upstream/generic Samba or FreeIPA is ever installed.
-name: dirauditor-lab
-switch: da-lab               # Hyper-V *internal* switch (isolated, no uplink)
-subnet: 10.55.0.0/24         # informational
-repo_dir: C:\src\directory-auditor   # local clone to build from
-ref: main                    # default git ref to build (branch, tag or commit)
-work_dir: C:\lab\work        # builds, unattend files and reports land here
+#
+# Passwords are never stored here: set them in the UI (Setup) or in
+# LAB_ADMIN_PASSWORD / LAB_AUDIT_PASSWORD for the CLI.
+name: ru-mixed
+switch: lc-lab               # Hyper-V internal switch; created on the first create
+subnet: 10.10.30.0/24        # .1 is the host's address on the lab switch
+work_dir: work               # relative = next to this file
+ssh_user: altadmin           # Linux login; vendor DCs disable root SSH
 
 machines:
-  - name: DA-DC-2022
+  - name: W2022
     kind: windows-dc
     iso: C:\iso\WinServer2022_Eval.iso
-    domain: da.test
-    ip: 10.55.0.10
+    domain: corp22.test
+    ip: 10.10.30.10
     forest_mode: Win2016
-    expect: testdata/lab/windows-expect.yaml
-    cpu: 2
-    mem_gb: 4
-    disk_gb: 60
 
-  - name: DA-DC-2025
+  - name: W2025
     kind: windows-dc
     iso: C:\iso\WinServer2025_Eval.iso
-    domain: da.test
-    ip: 10.55.0.11
+    domain: corp25.test
+    ip: 10.10.30.11
     forest_mode: Win2025
-    expect: testdata/lab/windows-expect.yaml
-    cpu: 2
-    mem_gb: 4
-    disk_gb: 60
 
-  - name: DA-ALT-DOMEN
-    kind: alt-domen            # Альт Домен — a Samba AD DC on Alt Server
+  - name: ALT
+    kind: alt-domen            # Альт Домен — Samba AD DC on ALT
     iso: C:\iso\alt-domain.iso
     domain: alt.test
-    ip: 10.55.0.12
-    expect: testdata/lab/samba-expect.yaml
-    cpu: 2
-    mem_gb: 4
+    ip: 10.10.30.12
     disk_gb: 40
 
-  - name: DA-REDADM
-    kind: red-adm              # РЕД АДМ (RED OS) — Samba DC-based (FreeIPA not supported)
-    iso: C:\iso\red-adm.iso    # provisioned with the RED OS vendor Samba-DC packages
+  - name: REDADM
+    kind: red-adm              # РЕД АДМ (RED OS) — Samba DC-based
+    iso: C:\iso\red-adm.iso
     domain: red.test
-    ip: 10.55.0.13
-    expect: testdata/lab/samba-expect.yaml
-    cpu: 2
-    mem_gb: 4
+    ip: 10.10.30.13
     disk_gb: 40
 
-  - name: DA-ALDPRO
-    kind: ald-pro              # ALD Pro (Astra) — FreeIPA-based
-    iso: C:\iso\ald-pro.iso    # aldpro-mp + aldpro-server-install stands up the domain
+  - name: ALDPRO
+    kind: ald-pro              # ALD Pro (Astra Linux) — FreeIPA-based
+    iso: C:\iso\ald-pro.iso
     domain: ald.test
-    ip: 10.55.0.14
-    expect: testdata/lab/freeipa-admin-expect.yaml
-    cpu: 2
+    ip: 10.10.30.14
     mem_gb: 6
     disk_gb: 50
 
-  # The auditor. A small Linux VM that is NOT domain-joined; every scan runs
-  # from here against each DC over the network. Needs key-based SSH (root@ip)
-  # and openssl (to pin each target's LDAPS cert). Any small Linux ISO works.
-  - name: DA-SCANNER
+  # Optional: a Linux workstation that is NOT domain-joined, for testing tools
+  # that should run from inside the lab network (any small Linux ISO works).
+  - name: SCANNER
     kind: linux-scanner
     iso: C:\iso\alt-workstation.iso
-    ip: 10.55.0.9
-    cpu: 2
+    ip: 10.10.30.9
     mem_gb: 2
     disk_gb: 20

@@ -1,14 +1,15 @@
 // Package labctl is the lab control panel that runs on the Hyper-V host: it
-// builds dirauditor from a local clone, creates and provisions the lab VMs
-// (Windows AD DCs and Samba/Альт Домен DCs) from ISOs you supply, then deploys
-// the freshly built binary and scans each target. It is a separate tool from
-// the read-only auditor and never linked into it.
+// creates directory test labs on demand — VMs installed from ISOs you supply,
+// promoted to domain controllers (Windows AD, Samba AD DC, FreeIPA) and seeded
+// with deliberately weak objects — and describes the result in lab-info.json
+// so any testing tool can use the lab. All provisioning scripts are embedded.
 package labctl
 
 import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -19,15 +20,19 @@ import (
 // writes it; everything the orchestrator needs comes from here.
 type Lab struct {
 	Name     string    `yaml:"name" json:"name"`
-	Switch   string    `yaml:"switch" json:"switch"`     // Hyper-V internal switch the lab lives on
-	Subnet   string    `yaml:"subnet" json:"subnet"`     // informational, e.g. 10.55.0.0/24
-	RepoDir  string    `yaml:"repo_dir" json:"repo_dir"` // local clone of directory-auditor to build
-	Ref      string    `yaml:"ref" json:"ref"`           // git ref to build (branch, tag or commit); default main
-	WorkDir  string    `yaml:"work_dir" json:"work_dir"` // where builds, unattend files and reports land
-	SSHUser  string    `yaml:"ssh_user" json:"ssh_user"` // default SSH login for Linux guests; vendor DCs disable root, so this is usually a sudo-capable admin (e.g. altadmin), not root
+	Switch   string    `yaml:"switch" json:"switch"`               // Hyper-V internal switch the lab lives on
+	Subnet   string    `yaml:"subnet" json:"subnet"`               // informational, e.g. 10.55.0.0/24
+	WorkDir  string    `yaml:"work_dir" json:"work_dir"`           // VHDs, answer media, extracted scripts, lab-info.json; relative = next to the lab file
+	SSHUser  string    `yaml:"ssh_user,omitempty" json:"ssh_user"` // default SSH login for Linux guests; vendor DCs disable root, so this is usually a sudo-capable admin (e.g. altadmin), not root
 	Machines []Machine `yaml:"machines" json:"machines"`
 
-	path string `yaml:"-"`
+	// Legacy fields from the Directory Auditor era. Accepted so old lab files
+	// still load, reported as warnings, and dropped on the next save.
+	LegacyRepoDir string `yaml:"repo_dir,omitempty" json:"-"`
+	LegacyRef     string `yaml:"ref,omitempty" json:"-"`
+
+	path     string   `yaml:"-"`
+	warnings []string `yaml:"-"`
 }
 
 // Machine is one lab VM.
@@ -43,7 +48,8 @@ type Machine struct {
 	DiskGB     int    `yaml:"disk_gb" json:"disk_gb"`         // system disk in GB (default 60)
 	ForestMode string `yaml:"forest_mode" json:"forest_mode"` // windows-dc only
 	SSHUser    string `yaml:"ssh_user" json:"ssh_user"`       // per-machine SSH login override (Linux guests); falls back to the lab default, then root
-	Expect     string `yaml:"expect" json:"expect"`           // optional verify expectation file
+
+	LegacyExpect string `yaml:"expect,omitempty" json:"-"` // Directory Auditor era; ignored
 }
 
 var (
@@ -66,8 +72,52 @@ func Load(path string) (*Lab, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	l.path = path
+	l.collectLegacy()
 	l.defaults()
 	return &l, l.Validate()
+}
+
+// collectLegacy turns Directory Auditor-era fields into warnings and clears
+// them, so the next Save writes a clean file.
+func (l *Lab) collectLegacy() {
+	if l.LegacyRepoDir != "" || l.LegacyRef != "" {
+		l.warnings = append(l.warnings, "repo_dir/ref are no longer used (lab-creator embeds its scripts and builds no tool); they will be removed on the next save")
+	}
+	l.LegacyRepoDir, l.LegacyRef = "", ""
+	for i := range l.Machines {
+		if l.Machines[i].LegacyExpect != "" {
+			l.warnings = append(l.warnings, fmt.Sprintf("%s: expect is no longer used (testing tools assert against lab-info.json); it will be removed on the next save", l.Machines[i].Name))
+			l.Machines[i].LegacyExpect = ""
+		}
+	}
+}
+
+// Warnings returns non-fatal notes found while loading the lab file.
+func (l *Lab) Warnings() []string { return l.warnings }
+
+// Dir is the directory holding the lab file; relative paths resolve against it.
+func (l *Lab) Dir() string {
+	d := filepath.Dir(l.path)
+	if abs, err := filepath.Abs(d); err == nil {
+		return abs
+	}
+	return d
+}
+
+// Work returns the absolute work directory (relative work_dir is taken from
+// the lab file's folder, not the current directory, so a double-clicked
+// labctl and a CI job resolve the same place).
+func (l *Lab) Work() string {
+	if filepath.IsAbs(l.WorkDir) {
+		return l.WorkDir
+	}
+	return filepath.Join(l.Dir(), l.WorkDir)
+}
+
+// Saved reports whether the lab file exists on disk.
+func (l *Lab) Saved() bool {
+	_, err := os.Stat(l.path)
+	return err == nil
 }
 
 // NewDefault returns an unsaved lab with sensible defaults and no machines,
@@ -95,11 +145,8 @@ func (l *Lab) Save() error {
 func (l *Lab) Path() string { return l.path }
 
 func (l *Lab) defaults() {
-	if l.Ref == "" {
-		l.Ref = "main"
-	}
 	if l.Switch == "" {
-		l.Switch = "da-lab"
+		l.Switch = "lc-lab"
 	}
 	if l.WorkDir == "" {
 		l.WorkDir = "labctl-work"
@@ -129,9 +176,6 @@ func (l *Lab) defaults() {
 func (l *Lab) Validate() error {
 	var errs []string
 	add := func(f string, a ...any) { errs = append(errs, fmt.Sprintf(f, a...)) }
-	if strings.TrimSpace(l.RepoDir) == "" {
-		add("repo_dir is required (the local clone of directory-auditor to build)")
-	}
 	// If a subnet is declared, every machine IP must fall inside it. The live
 	// lab had two labs collide on 10.10.10.0/24 and one had to be re-IP'd to
 	// 10.10.20.0/24; catching an out-of-subnet IP here turns that into a config
@@ -144,6 +188,7 @@ func (l *Lab) Validate() error {
 			subnet = n
 		}
 	}
+	hostIP, _ := hostAddr(l.Subnet)
 	seen := map[string]bool{}
 	ips := map[string]bool{}
 	scanners := 0
@@ -170,6 +215,8 @@ func (l *Lab) Validate() error {
 			add("%s: ip %q is invalid", m.Name, m.IP)
 		} else if ips[m.IP] {
 			add("duplicate ip %s", m.IP)
+		} else if m.IP == hostIP {
+			add("%s: ip %s is reserved for the host on the lab switch (first address of the subnet)", m.Name, m.IP)
 		} else if subnet != nil {
 			if ip := net.ParseIP(m.IP); ip == nil || !subnet.Contains(ip) {
 				add("%s: ip %s is outside the lab subnet %s", m.Name, m.IP, l.Subnet)
@@ -199,8 +246,8 @@ func (l *Lab) Machine(name string) *Machine {
 	return nil
 }
 
-// Scanner returns the dedicated scanner machine (the non-joined Linux VM that
-// runs every scan), or nil if the lab has none.
+// Scanner returns the scanner workstation (the non-joined Linux VM testing
+// tools run from), or nil if the lab has none.
 func (l *Lab) Scanner() *Machine {
 	for i := range l.Machines {
 		if p, ok := plugin(l.Machines[i].Kind); ok && p.Scanner {
@@ -210,7 +257,8 @@ func (l *Lab) Scanner() *Machine {
 	return nil
 }
 
-// isScanner reports whether a machine is the scanner (not a scan target).
+// isScanner reports whether a machine is the scanner workstation rather than a
+// directory server.
 func (m *Machine) isScanner() bool {
 	p, ok := plugin(m.Kind)
 	return ok && p.Scanner

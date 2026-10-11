@@ -20,21 +20,45 @@ function go(view){
 }
 document.querySelectorAll(".ptab").forEach(t=>t.onclick=()=>go(t.dataset.go));
 
+const HOST_IDS = ["host","hyperv","rights"];
+function checkOK(id){ const c=(state.checks||[]).find(x=>x.id===id); return !c || c.ok; }
+function hostReady(){ return HOST_IDS.every(checkOK); }
+
 async function refresh(){
   const s = await api("/api/state");
   if(!s.ok) return;
   state = s; lab = s.lab; kinds = s.kinds || [];
   $("labname").textContent = lab.name ? "· "+lab.name : "";
+  $("labpath").textContent = s.lab_path + (s.saved ? "" : " (not saved yet)");
   $("hostbanner").classList.toggle("hidden", s.host_ok);
-  $("hostbadge").textContent = s.host_ok ? "Hyper-V host" : "UI only";
-  if(!s.host_ok) $("hostmsg").textContent = s.host_msg+" Build, config and the UI work here; VM actions need the Windows host.";
+  $("hostbadge").textContent = s.host_ok ? (s.ready ? "Hyper-V host · ready" : "Hyper-V host · setup") : "UI only";
+  if(!s.host_ok) $("hostmsg").textContent = s.host_msg+" Config and the UI work here; VM actions need the Windows host.";
+  $("notes").innerHTML = (s.warnings||[]).map(w=>`<div class="infobar warn" style="margin-top:8px"><span class="ii">!</span><span>${esc(w)}</span></div>`).join("");
   $("credsok").classList.toggle("hidden", !s.creds_set);
-  $("builtline").textContent = s.built ? ("built "+s.built.version+" ("+s.built.commit+")") : "not built yet";
+  renderChecks();
   renderRows();
+  $("notready").classList.toggle("hidden", s.ready);
+  const setupTab = document.querySelector('.ptab[data-go="setup"]');
+  setupTab.classList.toggle("done", s.ready);
   const busy = s.busy;
-  document.querySelectorAll("button.btn, .rowact button").forEach(b=>{ b.disabled = busy; });
+  $("savecreds").disabled = busy; $("savecfg").disabled = busy;
+  $("resetall").disabled = busy || !hostReady() || !(state.machines||[]).some(m=>m.has_baseline);
+  $("labinfo").href = "/api/lab-info?t="+TOKEN;
   $("jobline").textContent = s.job ? (s.job.title+" · "+s.job.status) : (busy?"busy":"idle");
-  if(s.job){ tail(s.job.id); }
+  if(s.job && (!es || es._id!==s.job.id) && s.job.status==="running"){ tail(s.job.id); }
+}
+
+function renderChecks(){
+  const ul = $("checks"); ul.innerHTML = "";
+  (state.checks||[]).forEach(c=>{
+    const cls = c.ok ? "" : (c.required ? "c-fail" : "c-warn");
+    const ic = c.ok ? "✓" : (c.required ? "✕" : "!");
+    const li = document.createElement("li"); li.className = cls;
+    li.innerHTML = `<span class="ic">${ic}</span><div><div class="lbl">${esc(c.label)}</div>${c.detail?`<div class="det">${esc(c.detail)}</div>`:""}</div>`;
+    ul.appendChild(li);
+  });
+  const blocking = (state.checks||[]).filter(c=>c.required && !c.ok).length;
+  $("readyline").textContent = state.ready ? "Setup complete — continue on the Lab tab." : (blocking+" item(s) to fix before VM actions are enabled.");
 }
 
 function kindPill(kind){
@@ -44,17 +68,32 @@ function kindPill(kind){
   return `<span class="kindpill" title="${esc(label)}"><span class="os ${esc(os)}"></span>${esc(kind)}</span>`;
 }
 
+function why(action){
+  if(state.busy) return "another action is running";
+  if(!hostReady()) return "Setup: the Hyper-V host is not ready";
+  if((action==="create"||action==="provision") && !state.ready) return "Setup is not complete";
+  return "";
+}
+
 function renderRows(){
   const tb = $("rows"); tb.innerHTML = "";
-  (state.machines||[]).forEach(m=>{
+  const ms = state.machines||[];
+  $("norows").classList.toggle("hidden", ms.length>0);
+  ms.forEach(m=>{
     const dot = m.vm_state==="Running"?"run":(m.vm_state?"off":"none");
     const vm = m.vm_state || (state.host_ok?"absent":"—");
-    const res = m.result ? `<span class="${m.result.pass?'pass':'fail'}">${m.result.pass?'PASS':'FAIL'}</span> <span class="hint">${esc(m.result.summary)}</span>` : "<span class=hint>—</span>";
-    const base = m.has_baseline ? "✓" : "<span class=hint>—</span>";
-    const acts = ["create","provision","snapshot","reset","start","stop","scan"].map(a=>`<button data-m="${esc(m.name)}" data-a="${a}">${a}</button>`).join("");
+    const base = m.scanner ? "<span class=hint>n/a</span>" : (m.has_baseline ? "✓" : "<span class=hint>—</span>");
+    const list = m.scanner ? ["create","provision","start","stop"] : ["create","provision","snapshot","reset","start","stop"];
+    const acts = list.map(a=>{
+      let w = why(a);
+      if(!w && a==="create" && m.vm_state) w = "the VM already exists";
+      if(!w && a==="reset" && !m.has_baseline) w = "no baseline yet — provision and snapshot first";
+      if(!w && (a==="snapshot"||a==="provision"||a==="start"||a==="stop") && !m.vm_state) w = "create the VM first";
+      return `<button data-m="${esc(m.name)}" data-a="${a}"${w?` disabled title="${esc(w)}"`:""}>${a}</button>`;
+    }).join("");
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td><b>${esc(m.name)}</b></td><td>${kindPill(m.kind)}</td><td>${esc(m.domain)}</td><td class=mono>${esc(m.ip)}</td>`+
-      `<td><span class="dot ${dot}"></span>${esc(vm)}</td><td>${base}</td><td>${res}</td><td><div class="rowact">${acts}</div></td>`;
+    tr.innerHTML = `<td><b>${esc(m.name)}</b></td><td>${kindPill(m.kind)}</td><td>${esc(m.domain||"—")}</td><td class=mono>${esc(m.ip)}</td>`+
+      `<td><span class="dot ${dot}"></span>${esc(vm)}</td><td>${base}</td><td><div class="rowact">${acts}</div></td>`;
     tb.appendChild(tr);
   });
   tb.querySelectorAll(".rowact button").forEach(b=>b.onclick=()=>machine(b.dataset.m,b.dataset.a));
@@ -72,6 +111,7 @@ function tail(id){
   if(es){es.close();es=null;}
   $("console").innerHTML = "";
   es = new EventSource("/api/logs?job="+encodeURIComponent(id)+"&t="+TOKEN);
+  es._id = id;
   es.addEventListener("log", e=>line(JSON.parse(e.data)));
   es.addEventListener("done", e=>{ line("— "+JSON.parse(e.data)+" —"); es.close(); es=null; setTimeout(refresh,500); });
   es.onerror = ()=>{ if(es){es.close();es=null;} };
@@ -89,13 +129,14 @@ $("savecreds").onclick = async ()=>{
   await api("/api/creds",{AdminPassword:$("c_admin").value,AuditPassword:$("c_audit").value,AuditUser:$("c_user").value});
   $("c_admin").value=""; $("c_audit").value=""; refresh();
 };
-$("build").onclick = ()=>start(()=>api("/api/build",{ref:$("ref").value.trim()}));
-$("runall").onclick = ()=>start(()=>api("/api/run-all",{}));
+$("resetall").onclick = ()=>start(()=>api("/api/reset-all",{}));
+$("tosetup").onclick = e=>{ e.preventDefault(); go("setup"); };
 
 /* ---- config editor ---- */
 function fillCfg(){
   $("cfgpath").textContent = ""; $("cfgerr").classList.add("hidden");
-  $("f_repo").value=lab.repo_dir||""; $("f_switch").value=lab.switch||""; $("f_work").value=lab.work_dir||""; $("f_ref").value=lab.ref||"";
+  $("cfgpath").textContent = state ? state.lab_path : "";
+  $("f_switch").value=lab.switch||""; $("f_work").value=lab.work_dir||"";
   $("f_subnet").value=lab.subnet||""; $("f_ssh").value=lab.ssh_user||"";
   const mr = $("mrows"); mr.innerHTML="";
   (lab.machines||[]).forEach((m,i)=>mr.appendChild(mrow(m,i)));
@@ -114,23 +155,29 @@ function mrow(m,i){
     `<button class="del">✕</button>`+
     f("iso",m.iso,"path to install ISO")+f("forest_mode",m.forest_mode,"Win2016")+
     f("ssh_user",m.ssh_user,"blank = lab default")+
-    f("expect",m.expect,"testdata/lab/windows-expect.yaml")+f("cpu",m.cpu)+f("mem_gb",m.mem_gb)+f("disk_gb",m.disk_gb);
+    f("cpu",m.cpu)+f("mem_gb",m.mem_gb)+f("disk_gb",m.disk_gb);
   d.querySelector(".del").onclick=()=>{ lab.machines.splice(i,1); fillCfg(); };
   return d;
 }
-$("addm").onclick = ()=>{ lab.machines=lab.machines||[]; lab.machines.push({name:"NEW",kind:(kinds[0]&&kinds[0].kind)||"windows-dc",domain:"da.test",ip:"10.55.0.20",prefix:24,cpu:2,mem_gb:4,disk_gb:60,forest_mode:"Win2016"}); fillCfg(); };
+$("addm").onclick = ()=>{
+  lab.machines=lab.machines||[];
+  const n = lab.machines.length;
+  const net = (lab.subnet||"10.10.30.0/24").split("/")[0].split(".").slice(0,3).join(".");
+  lab.machines.push({name:"DC"+(n+1),kind:"windows-dc",domain:"corp.test",ip:net+"."+(10+n),prefix:24,cpu:2,mem_gb:4,disk_gb:60,forest_mode:"Win2016"});
+  fillCfg();
+};
 $("savecfg").onclick = async ()=>{
   const g=id=>$(id).value.trim();
-  const next = {name:lab.name,subnet:g("f_subnet"),ssh_user:g("f_ssh"),repo_dir:g("f_repo"),switch:g("f_switch"),work_dir:g("f_work"),ref:g("f_ref"),machines:[]};
+  const next = {name:lab.name,subnet:g("f_subnet"),ssh_user:g("f_ssh"),switch:g("f_switch"),work_dir:g("f_work"),machines:[]};
   document.querySelectorAll("#mrows .mrow").forEach(d=>{
     const v=k=>{const e=d.querySelector(".m_"+k);return e?e.value.trim():"";};
     const n=k=>parseInt(v(k)||"0",10);
     next.machines.push({name:v("name"),kind:v("kind"),domain:v("domain"),ip:v("ip"),iso:v("iso"),
-      forest_mode:v("forest_mode"),ssh_user:v("ssh_user"),expect:v("expect"),prefix:24,cpu:n("cpu"),mem_gb:n("mem_gb"),disk_gb:n("disk_gb")});
+      forest_mode:v("forest_mode"),ssh_user:v("ssh_user"),prefix:24,cpu:n("cpu"),mem_gb:n("mem_gb"),disk_gb:n("disk_gb")});
   });
   const r = await api("/api/config", next);
   if(!r.ok){ const e=$("cfgerr"); e.textContent=r.error; e.classList.remove("hidden"); return; }
-  refresh(); go("lab");
+  await refresh(); go(state && state.ready ? "lab" : "setup");
 };
 
 /* ---- chrome ---- */

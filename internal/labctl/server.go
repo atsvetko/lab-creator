@@ -13,18 +13,14 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/atsvetko/lab-creator/content"
 )
+
+func contentVersion() string { return content.Version }
 
 //go:embed web/*
 var webFS embed.FS
-
-// MachineResult is the outcome of the last scan of a machine.
-type MachineResult struct {
-	Scanned time.Time `json:"scanned"`
-	Pass    bool      `json:"pass"`
-	Summary string    `json:"summary"`
-	Report  string    `json:"report"`
-}
 
 // Server is the lab control panel.
 type Server struct {
@@ -34,10 +30,8 @@ type Server struct {
 	addr  string
 	stop  func()
 
-	mu      sync.Mutex
-	built   *Built
-	creds   Creds
-	results map[string]MachineResult
+	mu    sync.Mutex
+	creds Creds
 }
 
 // Serve starts the control panel on 127.0.0.1 and returns its URL (with the
@@ -53,8 +47,7 @@ func Serve(lab *Lab) (*Server, string, error) {
 	}
 	stop := make(chan struct{})
 	s := &Server{lab: lab, mgr: NewManager(), token: hex.EncodeToString(tok),
-		addr: ln.Addr().String(), results: map[string]MachineResult{},
-		creds: Creds{AuditUser: "audit"}}
+		addr: ln.Addr().String(), creds: Creds{AuditUser: "audit"}}
 	s.stop = func() { close(stop) }
 	srv := &http.Server{Handler: s.routes()}
 	go func() { _ = srv.Serve(ln) }()
@@ -90,9 +83,9 @@ func (s *Server) routes() http.Handler {
 	api("GET /api/state", s.handleState)
 	api("POST /api/creds", s.handleCreds)
 	api("POST /api/config", s.handleConfig)
-	api("POST /api/build", s.handleBuild)
 	api("POST /api/machine", s.handleMachine)
-	api("POST /api/run-all", s.handleRunAll)
+	api("POST /api/reset-all", s.handleResetAll)
+	api("GET /api/lab-info", s.handleLabInfo)
 	api("GET /api/logs", s.handleLogs)
 	api("POST /api/quit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": true})
@@ -112,24 +105,20 @@ func (s *Server) tokenOK(r *http.Request) bool {
 // --- handlers ---------------------------------------------------------------
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	hostOK, hostMsg := HostOK()
 
 	s.mu.Lock()
-	built := s.built
-	credsSet := s.creds.AdminPassword != "" || s.creds.AuditPassword != ""
-	results := map[string]MachineResult{}
-	for k, v := range s.results {
-		results[k] = v
-	}
+	cr := s.creds
 	s.mu.Unlock()
+	checks := Checks(ctx, s.lab, cr)
 
 	type mstate struct {
 		Machine
-		VMState     string         `json:"vm_state"`
-		HasBaseline bool           `json:"has_baseline"`
-		Result      *MachineResult `json:"result,omitempty"`
+		VMState     string `json:"vm_state"`
+		HasBaseline bool   `json:"has_baseline"`
+		Scanner     bool   `json:"scanner"`
 	}
 	ms := make([]mstate, 0, len(s.lab.Machines))
 	for _, m := range s.lab.Machines {
@@ -137,15 +126,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		base := false
 		if hostOK {
 			st = VMState(ctx, m.Name)
-			if st != "" {
-				base = HasCheckpoint(ctx, m.Name, "vuln-baseline")
+			if st != "" && !m.isScanner() {
+				base = HasCheckpoint(ctx, m.Name, baselineCheckpoint)
 			}
 		}
-		x := mstate{Machine: m, VMState: st, HasBaseline: base}
-		if rr, ok := results[m.Name]; ok {
-			x.Result = &rr
-		}
-		ms = append(ms, x)
+		ms = append(ms, mstate{Machine: m, VMState: st, HasBaseline: base, Scanner: m.isScanner()})
 	}
 
 	var job any
@@ -154,9 +139,19 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, map[string]any{
 		"ok": true, "host_ok": hostOK, "host_msg": hostMsg,
-		"lab": s.lab, "built": built, "creds_set": credsSet,
+		"lab": s.lab, "lab_path": s.lab.Path(), "saved": s.lab.Saved(), "warnings": s.lab.Warnings(),
+		"checks": checks, "ready": Ready(checks),
+		"creds_set": cr.AdminPassword != "" && cr.AuditPassword != "", "audit_user": cr.auditUser(),
 		"machines": ms, "busy": s.mgr.Busy(), "job": job, "kinds": Kinds(),
+		"content_version": contentVersion(),
 	})
+}
+
+func (s *Server) handleLabInfo(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	w.Header().Set("Content-Disposition", `attachment; filename="lab-info.json"`)
+	writeJSON(w, 200, BuildInfo(ctx, s.lab, s.snapCreds()))
 }
 
 func (s *Server) handleCreds(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +180,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"ok": false, "error": "bad json"})
 		return
 	}
+	if s.mgr.Busy() {
+		writeJSON(w, 409, map[string]any{"ok": false, "error": "an action is running; save the config when it finishes"})
+		return
+	}
 	// Preserve the path; take the editable fields from the request.
 	nl.path = s.lab.path
 	if err := nl.Save(); err != nil {
@@ -192,16 +191,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.lab = &nl
+	forgetHost() // the switch name may have changed
 	writeJSON(w, 200, map[string]any{"ok": true})
-}
-
-func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Ref string `json:"ref"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
-	j, err := s.startBuild(req.Ref)
-	s.jobReply(w, j, err)
 }
 
 func (s *Server) handleMachine(w http.ResponseWriter, r *http.Request) {
@@ -214,8 +205,8 @@ func (s *Server) handleMachine(w http.ResponseWriter, r *http.Request) {
 	s.jobReply(w, j, err)
 }
 
-func (s *Server) handleRunAll(w http.ResponseWriter, r *http.Request) {
-	j, err := s.startRunAll()
+func (s *Server) handleResetAll(w http.ResponseWriter, r *http.Request) {
+	j, err := s.startResetAll()
 	s.jobReply(w, j, err)
 }
 

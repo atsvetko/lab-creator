@@ -40,7 +40,7 @@ func TestSSHUserResolution(t *testing.T) {
 func TestSubnetValidation(t *testing.T) {
 	base := func() *Lab {
 		return &Lab{
-			RepoDir: ".", Subnet: "10.10.20.0/24",
+			Subnet:   "10.10.20.0/24",
 			Machines: []Machine{{Name: "dc", Kind: "windows-dc", Domain: "da.test", IP: "10.10.20.10"}},
 		}
 	}
@@ -79,7 +79,7 @@ func TestSubnetValidation(t *testing.T) {
 func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lab.yaml")
 	lab := &Lab{
-		Name: "w2025", Switch: "da-lab", Subnet: "10.10.30.0/24", RepoDir: ".",
+		Name: "w2025", Switch: "da-lab", Subnet: "10.10.30.0/24",
 		SSHUser: "altadmin", path: path,
 		Machines: []Machine{{Name: "w2025", Kind: "windows-dc", ISO: `D:\iso\win2025.iso`, Domain: "da.test", IP: "10.10.30.10"}},
 	}

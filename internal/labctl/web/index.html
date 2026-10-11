@@ -12,8 +12,8 @@
   <div class="prod"><span class="logo">LC</span><span>Lab Creator</span> <span class="sub mono" id="labname"></span></div>
   <nav class="pivot" role="tablist" id="tabs">
     <button class="ptab" role="tab" data-go="setup" aria-selected="true"><span class="num">1</span><span>Setup</span></button>
-    <button class="ptab" role="tab" data-go="lab"><span class="num">2</span><span>Lab</span></button>
-    <button class="ptab" role="tab" data-go="config"><span class="num">3</span><span>Config</span></button>
+    <button class="ptab" role="tab" data-go="config"><span class="num">2</span><span>Config</span></button>
+    <button class="ptab" role="tab" data-go="lab"><span class="num">3</span><span>Lab</span></button>
   </nav>
   <div class="hright"><button class="toggle" id="theme">Theme</button><button class="toggle" id="quit">Quit</button></div>
 </header>
@@ -28,48 +28,48 @@
 
   <!-- 1 · SETUP -->
   <section class="screen view" id="setup">
-    <h2 class="h2">Credentials &amp; build</h2>
-    <p class="tagline">Throw-away lab credentials live in memory for this session only — never written to the lab file. Then build the auditor from your local clone.</p>
+    <h2 class="h2">Setup</h2>
+    <p class="tagline">Everything below must be green before labctl touches a VM. Lab credentials live in memory for this session only — never written to the lab file.</p>
 
     <div class="infobar warn hidden" id="hostbanner"><span class="ii">!</span><span id="hostmsg"></span></div>
+    <div id="notes"></div>
+
+    <div class="sechd"><h3>Checklist</h3><span class="hint mono" id="labpath"></span></div>
+    <ul class="checks" id="checks"></ul>
 
     <div class="sechd"><h3>Credentials</h3><span class="ok hidden" id="credsok">set ✓</span></div>
     <div class="grid">
-      <label>Admin password <span class="hint">domain Administrator / root after promotion</span>
+      <label>Admin password <span class="hint">set on every DC (Administrator / IPA admin)</span>
         <input class="inp" id="c_admin" type="password" autocomplete="off"></label>
-      <label>Audit user <span class="hint">the ordinary account the scan uses</span>
+      <label>Audit user <span class="hint">ordinary account testers bind as</span>
         <input class="inp" id="c_user" type="text" autocomplete="off" placeholder="audit"></label>
-      <label>Audit password
+      <label>Audit password <span class="hint">&nbsp;</span>
         <input class="inp" id="c_audit" type="password" autocomplete="off"></label>
     </div>
-    <div class="actions"><button class="btn" id="savecreds">Save credentials</button></div>
-
-    <div class="sechd"><h3>Build the tool</h3><span class="hint" id="builtline">not built yet</span></div>
-    <div class="actions">
-      <label class="inline">ref <input class="inp sm" id="ref" type="text" autocomplete="off" placeholder="main / v0.1.0 / commit"></label>
-      <button class="btn" id="build">Build latest</button>
-    </div>
+    <div class="actions"><button class="btn" id="savecreds">Save credentials</button>
+      <span class="hint" id="readyline"></span></div>
   </section>
 
-  <!-- 2 · LAB -->
+  <!-- 3 · LAB -->
   <section class="screen view hidden" id="lab">
     <div class="sechd"><h2 class="h2">Lab machines</h2>
-      <button class="btn ghost sm" id="runall">Reset + scan all</button></div>
-    <p class="tagline">Create a VM from its ISO, provision the domain (it weakens the guest — lab only), snapshot a <code>vuln-baseline</code>, then scan and verify.</p>
+      <div class="actions" style="margin:0"><a class="btn ghost sm" id="labinfo" href="#" download="lab-info.json">Download lab-info.json</a>
+      <button class="btn ghost sm" id="resetall">Reset all</button></div></div>
+    <p class="tagline">Per machine: <b>create</b> installs the OS from its ISO, <b>provision</b> promotes the DC and seeds deliberately weak objects (lab only), <b>snapshot</b> saves the baseline, <b>reset</b> returns to it. Testing tools read <code>lab-info.json</code>.</p>
+    <div class="infobar hidden" id="notready"><span class="ii">i</span><span>Setup is not complete — create and provision stay disabled until it is. <a href="#" id="tosetup">Open Setup</a></span></div>
     <table class="machines"><thead><tr>
-      <th>Machine</th><th>Kind</th><th>Domain</th><th>IP</th><th>VM</th><th>Baseline</th><th>Last scan</th><th>Actions</th>
+      <th>Machine</th><th>Kind</th><th>Domain</th><th>IP</th><th>VM</th><th>Baseline</th><th>Actions</th>
     </tr></thead><tbody id="rows"></tbody></table>
+    <p class="hint hidden" id="norows">No machines yet — add them on the Config tab.</p>
   </section>
 
-  <!-- 3 · CONFIG -->
+  <!-- 2 · CONFIG -->
   <section class="screen view hidden" id="config">
     <div class="sechd"><h2 class="h2">Lab configuration</h2><span class="hint" id="cfgpath"></span></div>
     <div class="grid2">
-      <label>repo_dir <span class="hint">local clone to build from</span><input class="inp mono" id="f_repo" type="text"></label>
-      <label>switch <span class="hint">Hyper-V virtual switch</span><input class="inp mono" id="f_switch" type="text"></label>
-      <label>work_dir <span class="hint">VHDs, ISOs, reports</span><input class="inp mono" id="f_work" type="text"></label>
-      <label>default ref <input class="inp mono" id="f_ref" type="text"></label>
-      <label>subnet <span class="hint">CIDR; machine IPs must fall inside it</span><input class="inp mono" id="f_subnet" type="text"></label>
+      <label>switch <span class="hint">Hyper-V internal switch; created on first create</span><input class="inp mono" id="f_switch" type="text"></label>
+      <label>subnet <span class="hint">CIDR; .1 is the host, machine IPs must fall inside</span><input class="inp mono" id="f_subnet" type="text"></label>
+      <label>work_dir <span class="hint">VHDs, answer media, lab-info.json; relative = next to the lab file</span><input class="inp mono" id="f_work" type="text"></label>
       <label>ssh_user <span class="hint">Linux login; vendor DCs disable root — use a sudo admin (e.g. altadmin)</span><input class="inp mono" id="f_ssh" type="text"></label>
     </div>
     <div class="sechd"><h3>Machines</h3></div>
